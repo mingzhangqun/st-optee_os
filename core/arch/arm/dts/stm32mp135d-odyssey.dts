@@ -14,13 +14,13 @@
 #include <dt-bindings/soc/stm32mp-tzc400-macro.h>
 #include <dt-bindings/soc/stm32mp13-etzpc.h>
 #include <dt-bindings/soc/stm32mp13-tzc400.h>
+#include <dt-bindings/pinctrl/stm32-pinfunc.h>
 #include "stm32mp135.dtsi"
 #include "stm32mp13xf.dtsi"
-#include "stm32mp13-pinctrl.dtsi"
 
 / {
-	model = "STMicroelectronics STM32MP135F-DK Discovery Board";
-	compatible = "st,stm32mp135f-dk", "st,stm32mp135";
+	model = "Seeed STM32MP135D Odyssey Board";
+	compatible = "st,stm32mp135d-odyssey", "st,stm32mp135f-dk", "st,stm32mp135";
 
 	aliases {
 		serial0 = &uart4;
@@ -36,17 +36,17 @@
 		reg = <0xc0000000 0x20000000>;
 	};
 
-        reserved-memory {
-                #address-cells = <1>;
-                #size-cells = <1>;
-                ranges;
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
 
-                optee_framebuffer: optee-framebuffer@dd000000 {
-                        /* Secure framebuffer memory */
-                        reg = <0xdd000000 0x1000000>;
-                        st,protreg = <TZC_REGION_S_RDWR 0>;
-                };
-        };
+		optee_framebuffer: optee-framebuffer@dd000000 {
+			/* Secure framebuffer memory */
+			reg = <0xdd000000 0x1000000>;
+			st,protreg = <TZC_REGION_S_RDWR 0>;
+		};
+	};
 
 	vin: vin {
 		compatible = "regulator-fixed";
@@ -69,29 +69,6 @@
 		st,wakeup-pin-number = <2>;
 		status = "okay";
 	};
-
-	typec_wakeup: typec_wakeup {
-		compatible = "st,stm32mp1,pwr-irq-user";
-		/* Alert pin on PI2, wakeup_pin_5 */
-		st,wakeup-pin-number = <5>;
-		st,notif-it-id = <1>;
-		status = "okay";
-	};
-};
-
-&adc_2 {
-	vdda-supply = <&vdd_adc>;
-	vref-supply = <&vdd_adc>;
-	status = "okay";
-
-	adc2: adc@0 {
-		status = "okay";
-
-		channel@15 {
-			reg = <15>;
-			label = "vbat";
-		};
-	};
 };
 
 &bsec {
@@ -108,7 +85,7 @@
 &etzpc {
 	st,decprot = <
 		DECPROT(STM32MP1_ETZPC_ADC1_ID, DECPROT_NS_RW, DECPROT_UNLOCK)
-		DECPROT(STM32MP1_ETZPC_ADC2_ID, DECPROT_S_RW, DECPROT_UNLOCK)
+		DECPROT(STM32MP1_ETZPC_ADC2_ID, DECPROT_NS_RW, DECPROT_UNLOCK)
 		DECPROT(STM32MP1_ETZPC_BKPSRAM_ID, DECPROT_S_RW, DECPROT_UNLOCK)
 		DECPROT(STM32MP1_ETZPC_CRYP_ID, DECPROT_NS_RW, DECPROT_UNLOCK)
 		DECPROT(STM32MP1_ETZPC_DCMIPP_ID, DECPROT_NS_RW, DECPROT_UNLOCK)
@@ -152,10 +129,6 @@
 };
 
 &gpiob {
-	st,protreg = < (TZPROT(9)) >;
-};
-
-&gpiod {
 	st,protreg = < (TZPROT(7)) >;
 };
 
@@ -420,9 +393,7 @@
 };
 
 &rcc {
-	compatible = "st,stm32mp13-rcc", "syscon", "st,stm32mp13-rcc-mco";
-	pinctrl-0 = <&rcc_mco_pins_a>;
-	pinctrl-names = "default";
+	compatible = "st,stm32mp13-rcc", "syscon";
 
 	st,clksrc = <
 		CLK_MPU_PLL1P
@@ -624,22 +595,6 @@
 	};
 };
 
-&tamp {
-	st,tamp_passive_nb_sample = <4>;
-	st,tamp_passive_sample_clk_div = <16384>;
-
-	tamp_passive@2 {
-		pinctrl-0 = <&tamp0_in2_pin_a>;
-		status = "okay";
-	};
-
-	/* Connect pin8 and pin22 from CN3 */
-	tamp_active@1 {
-		pinctrl-0 = <&tamp0_in3_pin_a &tamp0_out1_pin_a>;
-		status = "disabled";
-	};
-};
-
 &timers12 {
 	status = "okay";
 
@@ -659,22 +614,87 @@
 };
 
 &usart1 {
-	pinctrl-names = "default";
-	pinctrl-0 = <&usart1_pins_a>;
-	uart-has-rtscts;
 	status = "disabled";
 };
 
 &uart8 {
-	pinctrl-names = "default";
-	pinctrl-0 = <&uart8_pins_a>;
 	status = "disabled";
 };
 
-&wakeup_pin_1 {
-	bias-pull-up;
-};
+&pinctrl {
+	i2c4_pins_a: i2c4-0 {
+		pins {
+			pinmux = <STM32_PINMUX('E', 15, AF6)>, /* I2C4_SCL */
+				 <STM32_PINMUX('B', 7, AF6)>; /* I2C4_SDA */
+			bias-disable;
+			drive-open-drain;
+			slew-rate = <0>;
+		};
+	};
 
-&wakeup_pin_5 {
-	bias-pull-up;
+	ltdc_pins_a: ltdc-0 {
+		pins {
+			pinmux = <STM32_PINMUX('D',  9, AF13)>, /* LCD_CLK */
+				 <STM32_PINMUX('E',  1, AF9)>, /* LCD_HSYNC */
+				 <STM32_PINMUX('G',  4, AF11)>, /* LCD_VSYNC */
+				 <STM32_PINMUX('H',  9, AF11)>, /* LCD_DE */
+				 <STM32_PINMUX('G',  7, AF14)>, /* LCD_R2 */
+				 <STM32_PINMUX('B', 12, AF13)>, /* LCD_R3 */
+				 <STM32_PINMUX('D', 14, AF14)>, /* LCD_R4 */
+				 <STM32_PINMUX('F',  5, AF14)>, /* LCD_R5 */
+				 <STM32_PINMUX('A',  9, AF14)>, /* LCD_R6 */
+				 <STM32_PINMUX('E',  9, AF14)>, /* LCD_R7 */
+				 <STM32_PINMUX('H', 13, AF14)>, /* LCD_G2 */
+				 <STM32_PINMUX('F',  3, AF14)>, /* LCD_G3 */
+				 <STM32_PINMUX('F',  2, AF13)>, /* LCD_G4 */
+				 <STM32_PINMUX('D', 10,  AF9)>, /* LCD_G5 */
+				 <STM32_PINMUX('E', 12, AF14)>, /* LCD_G6 */
+				 <STM32_PINMUX('A', 15, AF11)>, /* LCD_G7 */
+				 <STM32_PINMUX('H',  7, AF14)>, /* LCD_B2 */
+				 <STM32_PINMUX('E',  7, AF13)>, /* LCD_B3 */
+				 <STM32_PINMUX('G', 15, AF11)>, /* LCD_B4 */
+				 <STM32_PINMUX('E',  0, AF14)>, /* LCD_B5 */
+				 <STM32_PINMUX('D',  1, AF11)>,  /* LCD_B6 */
+				 <STM32_PINMUX('F',  1, AF13)>; /* LCD_B7 */
+			bias-disable;
+			drive-push-pull;
+			slew-rate = <0>;
+		};
+	};
+
+	uart4_pins_a: uart4-0 {
+		pins1 {
+			pinmux = <STM32_PINMUX('A', 13, AF8)>; /* UART4_TX */
+			bias-disable;
+			drive-push-pull;
+			slew-rate = <0>;
+		};
+		pins2 {
+			pinmux = <STM32_PINMUX('E', 5, AF8)>; /* UART4_RX */
+			bias-disable;
+		};
+	};
+
+	wakeup_pins: wakeup_pins {
+		wakeup_pin_1: pins1 {
+			pinmux = <STM32_PINMUX('F', 8, GPIO)>;	// PMIC_INT
+			bias-pull-up;
+		};
+		wakeup_pin_2: pins2 {
+			pinmux = <STM32_PINMUX('I', 3, GPIO)>;	// ETH1_WKUP
+		};
+		wakeup_pin_3: pins3 {
+			pinmux = <STM32_PINMUX('C', 13, GPIO)>;	// PMIC_WAKEUP
+		};
+		wakeup_pin_4: pins4 {
+			pinmux = <STM32_PINMUX('H', 10, GPIO)>;	// NC
+		};
+		wakeup_pin_5: pins5 {
+			pinmux = <STM32_PINMUX('I', 2, GPIO)>;	// NC
+			bias-pull-up;
+		};
+		wakeup_pin_6: pins6 {
+			pinmux = <STM32_PINMUX('C', 2, GPIO)>;	// NC
+		};
+	};
 };
