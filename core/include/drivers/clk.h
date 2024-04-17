@@ -8,11 +8,16 @@
 
 #include <kernel/refcount.h>
 #include <stdint.h>
+#include <sys/queue.h>
 #include <tee_api_types.h>
 
 /* Flags for clock */
 #define CLK_SET_RATE_GATE	BIT(0) /* must be gated across rate change */
 #define CLK_SET_PARENT_GATE	BIT(1) /* must be gated across re-parent */
+#define CLK_OPS_PARENT_ENABLE	BIT(2) /* parent need enable during re-parent */
+#define CLK_SET_RATE_PARENT	BIT(3) /* propagate rate change up one level */
+#define CLK_SET_RATE_UNGATE	BIT(4) /* clock needs to run to set rate */
+#define CLK_DUTY_CYCLE_PARENT	BIT(5) /* forward duty cycle call to parent */
 
 /**
  * struct clk - Clock structure
@@ -28,6 +33,8 @@
  * @parents: Array of possible parents of the clock
  */
 struct clk {
+	STAILQ_ENTRY(clk) link;
+
 	const char *name;
 	void *priv;
 	const struct clk_ops *ops;
@@ -40,16 +47,48 @@ struct clk {
 };
 
 /**
+ * struct clk_rate_request
+ *
+ * @rate:		Requested clock rate. This field will be adjusted by
+ *			clock drivers according to hardware capabilities.
+ * @best_parent_rate:	The best parent rate a parent can provide to fulfill the
+ *			requested constraints.
+ * @best_parent:	The most appropriate parent clock that fulfills the
+ *			requested constraints.
+ *
+ */
+struct clk_rate_request {
+	unsigned long rate;
+	unsigned long best_parent_rate;
+	struct clk *best_parent;
+};
+
+/**
+ * struct clk_duty - Struture encoding the duty cycle ratio of a clock
+ *
+ * @num:	Numerator of the duty cycle ratio
+ * @den:	Denominator of the duty cycle ratio
+ */
+struct clk_duty {
+	unsigned int num;
+	unsigned int den;
+};
+
+/**
  * struct clk_ops
  *
+ * @is_enabled: Get effective state of the clock (on / off)
  * @enable: Enable the clock
  * @disable: Disable the clock
  * @set_parent: Set the clock parent based on index
  * @get_parent: Get the current parent index of the clock
  * @set_rate: Set the clock rate
  * @get_rate: Get the clock rate
+ * @get_rates_array: Get the supported clock rates as array
+ * @get_rates_steps: Get support clock rates by min/max/step representation
  */
 struct clk_ops {
+	bool (*is_enabled)(struct clk *clk);
 	TEE_Result (*enable)(struct clk *clk);
 	void (*disable)(struct clk *clk);
 	TEE_Result (*set_parent)(struct clk *clk, size_t index);
@@ -58,6 +97,21 @@ struct clk_ops {
 			       unsigned long parent_rate);
 	unsigned long (*get_rate)(struct clk *clk,
 				  unsigned long parent_rate);
+	TEE_Result (*get_duty_cycle)(struct clk *clk,
+				     struct clk_duty *duty);
+	unsigned long (*round_rate)(struct clk *clk,
+				    unsigned long rate,
+				    unsigned long parent_rate);
+	TEE_Result (*determine_rate)(struct clk *clk,
+				     struct clk_rate_request *req);
+	TEE_Result (*get_rates_array)(struct clk *clk, size_t start_index,
+				      unsigned long *rates, size_t *nb_elts);
+	TEE_Result (*get_rates_steps)(struct clk *clk, unsigned long *min,
+				      unsigned long *max, unsigned long *step);
+#ifdef CFG_PM
+	TEE_Result (*save_context)(struct clk *clk);
+	void (*restore_context)(struct clk *clk);
+#endif
 };
 
 /**
@@ -115,6 +169,31 @@ unsigned long clk_get_rate(struct clk *clk);
  * Return a TEE_Result compliant value
  */
 TEE_Result clk_set_rate(struct clk *clk, unsigned long rate);
+
+/*
+ * clk_get_rates_array - Get supported rates as an array
+ *
+ * @clk: Clock for which the rates are requested
+ * @start_index: start index of requested rates
+ * @rates: Array of rates allocated by caller or NULL to query count of rates
+ * @nb_elts: Max number of elements that the array can hold as input. Contains
+ * the number of elements that was added in the array as output.
+ * Returns a TEE_Result compliant value
+ */
+TEE_Result clk_get_rates_array(struct clk *clk, size_t start_index,
+			       unsigned long *rates, size_t *nb_elts);
+
+/*
+ * clk_get_rates_steps - Get supported rates as min/max/step triplet
+ *
+ * @clk: Clock for which the rates are requested
+ * @min: Output min supported rate in Hz
+ * @max: Output max supported rate in Hz
+ * @step: Output rate step in Hz
+ * Returns a TEE_Result compliant value
+ */
+TEE_Result clk_get_rates_steps(struct clk *clk, unsigned long *min,
+			       unsigned long *max, unsigned long *step);
 
 /**
  * clk_enable - Enable a clock and its ascendance
@@ -177,5 +256,70 @@ struct clk *clk_get_parent_by_index(struct clk *clk, size_t pidx);
  * Return a TEE_Result compliant value
  */
 TEE_Result clk_set_parent(struct clk *clk, struct clk *parent);
+
+/**
+ * clk_get_parent_idx - Get index of clock parent
+ *
+ * @clk: Clock which contains parent clocks
+ * @parent: Parent clock for which you want to known the index
+ * Return a TEE_Result compliant value and set index of the parent clock
+ */
+TEE_Result clk_get_parent_idx(struct clk *clk, struct clk *parent,
+			      size_t *pidx);
+/**
+ * clk_reparent - Update clock parent
+ *
+ * This function mandates that clock framework is locked against
+ * concurrent accesses on clock tree.
+ *
+ * @clk: Clock for which the parent should be set
+ * @parent: Parent clock to set
+ * Return a TEE_Result compliant value
+ */
+TEE_Result clk_reparent(struct clk *clk, struct clk *parent);
+
+/**
+ * clk_get_duty_cycle - Get clock duty cycle
+ *
+ * @clk: Clock for which the duty cycle is requested
+ * @duty: Output duty cycle info
+ * Return a TEE_Result compliant value
+ */
+TEE_Result clk_get_duty_cycle(struct clk *clk, struct clk_duty *duty);
+
+/**
+ * clk_round_rate - Round the given rate for a clock
+ * @clk: Clock for which the round rate is need
+ * @rate: The rate which is to be rounded
+ * Returns the closest rate actually supported by the clock.
+ */
+unsigned long clk_round_rate(struct clk *clk, unsigned long rate);
+
+void clk_summary(void);
+
+#ifdef CFG_PM
+/**
+ * clk_save_context - save clock context for poweroff
+ *
+ * Saves the context of the clock register for powerstates in which the
+ * contents of the registers will be lost. Occurs deep within the suspend
+ * code.
+ */
+TEE_Result clk_save_context(void);
+
+/**
+ * clk_restore_context - restore clock context after poweroff
+ *
+ * Restore the saved clock context upon resume.
+ *
+ */
+void clk_restore_context(void);
+
+#else /* CFG_PM */
+
+static inline TEE_Result clk_save_context(void) { return TEE_SUCCESS; };
+static inline void clk_restore_context(void) {};
+
+#endif /* CFG_PM */
 
 #endif /* __DRIVERS_CLK_H */

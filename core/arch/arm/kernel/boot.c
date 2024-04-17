@@ -914,7 +914,7 @@ static int add_res_mem_dt_node(struct dt_descriptor *dt, const char *name,
 		offs = 0;
 	}
 
-	if (IS_ENABLED(_CFG_USE_DTB_OVERLAY)) {
+	if (IS_ENABLED2(_CFG_USE_DTB_OVERLAY)) {
 		len_size = sizeof(paddr_t) / sizeof(uint32_t);
 		addr_size = sizeof(paddr_t) / sizeof(uint32_t);
 	} else {
@@ -1205,7 +1205,18 @@ static void discover_nsec_memory(void)
 			return;
 		}
 
-		DMSG("No non-secure memory found in FDT");
+		DMSG("No non-secure memory found in external DT");
+	}
+
+	fdt = get_embedded_dt();
+	if (fdt) {
+		mem = get_nsec_memory(fdt, &nelems);
+		if (mem) {
+			core_mmu_set_discovered_nsec_ddr(mem, nelems);
+			return;
+		}
+
+		DMSG("No non-secure memory found in embedded DT");
 	}
 
 	mem_begin = phys_ddr_overall_begin;

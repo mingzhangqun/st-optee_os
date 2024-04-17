@@ -15,8 +15,8 @@ struct stm32_uart_pdata {
 	struct serial_chip chip;
 	bool secure;
 	struct clk *clock;
-	struct stm32_pinctrl *pinctrl;
-	size_t pinctrl_count;
+	struct stm32_pinctrl_list *pinctrl;
+	char fifo_size;
 };
 
 /*

@@ -17,37 +17,40 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <sys/queue.h>
+#include <tee_api_types.h>
 
-#define GPIO_MODE_INPUT		0x0
-#define GPIO_MODE_OUTPUT	0x1
-#define GPIO_MODE_ALTERNATE	0x2
-#define GPIO_MODE_ANALOG	0x3
+#define GPIO_MODE_INPUT		U(0x0)
+#define GPIO_MODE_OUTPUT	U(0x1)
+#define GPIO_MODE_ALTERNATE	U(0x2)
+#define GPIO_MODE_ANALOG	U(0x3)
 
-#define GPIO_OTYPE_PUSH_PULL	0x0
-#define GPIO_OTYPE_OPEN_DRAIN	0x1
+#define GPIO_OTYPE_PUSH_PULL	U(0x0)
+#define GPIO_OTYPE_OPEN_DRAIN	U(0x1)
 
-#define GPIO_OSPEED_LOW		0x0
-#define GPIO_OSPEED_MEDIUM	0x1
-#define GPIO_OSPEED_HIGH	0x2
-#define GPIO_OSPEED_VERY_HIGH	0x3
+#define GPIO_OSPEED_LOW		U(0x0)
+#define GPIO_OSPEED_MEDIUM	U(0x1)
+#define GPIO_OSPEED_HIGH	U(0x2)
+#define GPIO_OSPEED_VERY_HIGH	U(0x3)
 
-#define GPIO_PUPD_NO_PULL	0x0
-#define GPIO_PUPD_PULL_UP	0x1
-#define GPIO_PUPD_PULL_DOWN	0x2
+#define GPIO_PUPD_NO_PULL	U(0x0)
+#define GPIO_PUPD_PULL_UP	U(0x1)
+#define GPIO_PUPD_PULL_DOWN	U(0x2)
 
-#define GPIO_OD_LEVEL_LOW	0x0
-#define GPIO_OD_LEVEL_HIGH	0x1
+#define GPIO_OD_LEVEL_LOW	U(0x0)
+#define GPIO_OD_LEVEL_HIGH	U(0x1)
 
 /*
  * GPIO configuration description structured as single 16bit word
  * for efficient save/restore when GPIO pin suspends or resumes.
  *
- * @mode: One of GPIO_MODE_*
- * @otype: One of GPIO_OTYPE_*
- * @ospeed: One of GPIO_OSPEED_*
- * @pupd: One of GPIO_PUPD_*
- * @od: One of GPIO_OD_*
- * @af: Alternate function numerical ID between 0 and 15
+ * @mode:       One of GPIO_MODE_*
+ * @otype:      One of GPIO_OTYPE_*
+ * @ospeed:     One of GPIO_OSPEED_*
+ * @pupd:       One of GPIO_PUPD_*
+ * @od:         One of GPIO_OD_*
+ * @af:         Alternate function numerical ID between 0 and 15
  */
 struct gpio_cfg {
 	uint16_t mode:		2;
@@ -63,94 +66,84 @@ struct gpio_cfg {
  *
  * @bank: GPIO bank identifier as assigned by the platform
  * @pin: Pin number in the GPIO bank
- * @active_cfg: Configuratioh in active state
- * @standby_cfg: Configuratioh in standby state
+ * @config: Configuratioh in active state
+ * @link: Link to chain stm32_pinctrl structure in the list
  */
 struct stm32_pinctrl {
 	uint8_t bank;
 	uint8_t pin;
-	struct gpio_cfg active_cfg;
-	struct gpio_cfg standby_cfg;
+	struct gpio_cfg config;
+
+	STAILQ_ENTRY(stm32_pinctrl) link;
 };
 
 /*
- * Apply series of pin muxing configuration, active state and standby state
+ * Structure used to define list of stm32_pinctrl
  *
- * @pinctrl: array of pinctrl references
- * @count: Number of entries in @pinctrl
+ * @stm32_pinctrl_list	Structure name
+ * @stm32_pinctrl	Element of the structure
  */
-void stm32_pinctrl_load_active_cfg(struct stm32_pinctrl *pinctrl, size_t cnt);
-void stm32_pinctrl_load_standby_cfg(struct stm32_pinctrl *pinctrl, size_t cnt);
+STAILQ_HEAD(stm32_pinctrl_list, stm32_pinctrl);
+
+/* Get thr GPIO ID related to the pin referred by @pin */
+unsigned int stm32_pinctrl_get_gpio_id(struct stm32_pinctrl *pin);
 
 /*
- * Save the current pin configuration as the standby state for a pin series
+ * Apply series of pin muxing configuration
  *
- * @pinctrl: array of pinctrl references
- * @count: Number of entries in @pinctrl
+ * @list: List of the pinctrl configuration to load
  */
-void stm32_pinctrl_store_standby_cfg(struct stm32_pinctrl *pinctrl, size_t cnt);
+void stm32_pinctrl_load_config(struct stm32_pinctrl_list *list);
 
 /*
- * Save pinctrl instances defined in DT node: identifiers and power states
+ * Get a pinctrl configuration reference from an indexed DT pinctrl property
  *
  * @fdt: device tree
  * @node: device node in the device tree
- * @pinctrl: NULL or pointer to array of struct stm32_pinctrl
- * @count: number of elements pointed by argument cfg
+ * @index: Index of the pinctrl property
+ * @plist: Output pinctrl list reference
  *
- * Return the number of pinctrl instances found or a negative value on error.
- *
- * When @count is 0, @pinctrl may be NULL. The function will return only the
- * number of pinctrl instances found in the device tree for the target
- * device node.
- *
- * If more instances than @count are found then the function returns the
- * effective number of pincltr instance found in the node but fills
- * output array @pinctrl only for the input @count first entries.
+ * Return a TEE_Result compliant code
  */
-int stm32_pinctrl_fdt_get_pinctrl(void *fdt, int node,
-				  struct stm32_pinctrl *pinctrl, size_t count);
+TEE_Result stm32_pinctrl_dt_get_by_index(const void *fdt, int nodeoffset,
+					 unsigned int index,
+					 struct stm32_pinctrl_list **plist);
 
 /*
- * Set target output GPIO pin to high or low level
+ * Get a pinctrl configuration reference from a named DT pinctrl property
  *
- * @bank: GPIO bank identifier as assigned by the platform
- * @pin: GPIO pin position in the GPIO bank
- * @high: 1 to set GPIO to high level, 0 to set to GPIO low level
+ * @fdt: device tree
+ * @node: device node in the device tree
+ * @name: Name of the pinctrl
+ * @plist: Output pinctrl list reference
+ *
+ * Return a TEE_Result compliant code
  */
-void stm32_gpio_set_output_level(unsigned int bank, unsigned int pin, int high);
+TEE_Result stm32_pinctrl_dt_get_by_name(const void *fdt, int nodeoffset,
+					const char *name,
+					struct stm32_pinctrl_list **plist);
+/*
+ * Read a pinctrl configuration from an indexed DT pinctrl property
+ * this configuration is not applied as it is done in
+ * stm32_pinctrl_dt_get_by_index()
+ *
+ * @fdt: device tree
+ * @node: device node in the device tree
+ * @index: Index of the pinctrl property
+ * @plist: Output pinctrl list reference
+ *
+ * Return a TEE_Result compliant code
+ */
+TEE_Result stm32_pinctrl_dt_read_by_index(const void *fdt, int nodeoffset,
+					  unsigned int index,
+					  struct stm32_pinctrl_list **plist);
 
 /*
- * Set output GPIO pin referenced by @pinctrl to high or low level
+ * Get the gpio_ops handle for a GPIO
  *
- * @pinctrl: Reference to pinctrl
- * @high: 1 to set GPIO to high level, 0 to set to GPIO low level
+ * Return the generic gpio_ops for GPIOS
  */
-static inline void stm32_pinctrl_set_gpio_level(struct stm32_pinctrl *pinctrl,
-						int high)
-{
-	stm32_gpio_set_output_level(pinctrl->bank, pinctrl->pin, high);
-}
-
-/*
- * Get input GPIO pin current level, high or low
- *
- * @bank: GPIO bank identifier as assigned by the platform
- * @pin: GPIO pin position in the GPIO bank
- * Return 1 if GPIO level is high, 0 if it is low
- */
-int stm32_gpio_get_input_level(unsigned int bank, unsigned int pin);
-
-/*
- * Set target output GPIO pin to high or low level
- *
- * @pinctrl: Reference to pinctrl
- * Return 1 if GPIO level is high, 0 if it is low
- */
-static inline int stm32_pinctrl_get_gpio_level(struct stm32_pinctrl *pinctrl)
-{
-	return stm32_gpio_get_input_level(pinctrl->bank, pinctrl->pin);
-}
+const struct gpio_ops *stm32_gpio_get_ops(void);
 
 #ifdef CFG_STM32_GPIO
 /*
@@ -159,26 +152,35 @@ static inline int stm32_pinctrl_get_gpio_level(struct stm32_pinctrl *pinctrl)
  * @bank: GPIO bank identifier as assigned by the platform
  * @pin: Pin number in the GPIO bank
  * @secure: True if pin is secure, false otherwise
+ *
+ * Return a TEE_Resutl compliant code
  */
-void stm32_gpio_set_secure_cfg(unsigned int bank, unsigned int pin,
-			       bool secure);
-#else
-static inline void stm32_gpio_set_secure_cfg(unsigned int bank __unused,
-					     unsigned int pin __unused,
-					     bool secure __unused)
-{
-	assert(0);
-}
-#endif
+TEE_Result stm32_gpio_set_secure_cfg(unsigned int bank, unsigned int pin,
+				     bool secure);
 
 /*
- * Get the number of GPIO pins supported by a target GPIO bank
+ * Configure pin muxing access permission: can be secure or not
  *
- * @fdt: device tree reference
- * @pinctrl_node: pinctrl node which GPIO bank node belongs to
- * @bank: target GPIO bank ID
- * Return number of GPIO pins (>= 0) or a negative value on error
+ * @list: Pinctrl list reference
+ * @secure: True if referenced pins are secure, false otherwise
+ *
+ * Return a TEE_Resutl compliant code
  */
-int stm32_get_gpio_count(void *fdt, int pinctrl_node, unsigned int bank);
+TEE_Result stm32_pinctrl_set_secure_cfg(struct stm32_pinctrl_list *list,
+					bool secure);
+#else
+static inline TEE_Result stm32_gpio_set_secure_cfg(unsigned int bank __unused,
+						   unsigned int pin __unused,
+						   bool secure __unused)
+{
+	return TEE_ERROR_NOT_SUPPORTED;
+}
 
+static inline
+TEE_Result stm32_pinctrl_set_secure_cfg(struct stm32_pinctrl_list *l __unused,
+					bool secure __unused)
+{
+	return TEE_ERROR_NOT_SUPPORTED;
+}
+#endif
 #endif /*__STM32_GPIO_H*/

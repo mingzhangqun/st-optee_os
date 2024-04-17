@@ -15,6 +15,7 @@
 #include "base.h"
 #include "clock.h"
 #include "common.h"
+#include "perf_domain.h"
 #include "reset_domain.h"
 #include "voltage_domain.h"
 
@@ -88,6 +89,9 @@ void scmi_process_message(struct scmi_msg *msg)
 	case SCMI_PROTOCOL_ID_VOLTAGE_DOMAIN:
 		handler = scmi_msg_get_voltd_handler(msg);
 		break;
+	case SCMI_PROTOCOL_ID_PERF:
+		handler = scmi_msg_get_perf_handler(msg);
+		break;
 	default:
 		break;
 	}
@@ -106,7 +110,10 @@ void scmi_process_message(struct scmi_msg *msg)
 #ifdef CFG_SCMI_MSG_SMT_FASTCALL_ENTRY
 void scmi_smt_fastcall_smc_entry(unsigned int channel_id)
 {
-	assert(!plat_scmi_get_channel(channel_id)->threaded);
+	struct scmi_msg_channel __maybe_unused *channel = NULL;
+
+	channel = plat_scmi_get_channel(channel_id);
+	assert(channel && !channel->threaded);
 
 	scmi_entry_smt(channel_id, fastcall_payload[get_core_pos()]);
 }
@@ -115,7 +122,10 @@ void scmi_smt_fastcall_smc_entry(unsigned int channel_id)
 #ifdef CFG_SCMI_MSG_SMT_INTERRUPT_ENTRY
 void scmi_smt_interrupt_entry(unsigned int channel_id)
 {
-	assert(!plat_scmi_get_channel(channel_id)->threaded);
+	struct scmi_msg_channel __maybe_unused *channel = NULL;
+
+	channel = plat_scmi_get_channel(channel_id);
+	assert(channel && !channel->threaded);
 
 	scmi_entry_smt(channel_id, interrupt_payload[get_core_pos()]);
 }
@@ -124,7 +134,10 @@ void scmi_smt_interrupt_entry(unsigned int channel_id)
 #ifdef CFG_SCMI_MSG_SMT_THREAD_ENTRY
 void scmi_smt_threaded_entry(unsigned int channel_id)
 {
-	assert(plat_scmi_get_channel(channel_id)->threaded);
+	struct scmi_msg_channel __maybe_unused *channel = NULL;
+
+	channel = plat_scmi_get_channel(channel_id);
+	assert(channel && channel->threaded);
 
 	scmi_entry_smt(channel_id, threaded_payload[thread_get_id()]);
 }
@@ -135,7 +148,10 @@ TEE_Result scmi_msg_threaded_entry(unsigned int channel_id,
 				   void *in_buf, size_t in_size,
 				   void *out_buf, size_t *out_size)
 {
-	assert(plat_scmi_get_channel(channel_id)->threaded);
+	struct scmi_msg_channel __maybe_unused *channel = NULL;
+
+	channel = plat_scmi_get_channel(channel_id);
+	assert(channel && channel->threaded);
 
 	return scmi_entry_msg(channel_id, in_buf, in_size, out_buf, out_size,
 			      threaded_payload[thread_get_id()]);
