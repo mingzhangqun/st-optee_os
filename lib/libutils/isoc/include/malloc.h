@@ -2,8 +2,8 @@
 /*
  * Copyright (c) 2014, STMicroelectronics International N.V.
  */
-#ifndef MALLOC_H
-#define MALLOC_H
+#ifndef __MALLOC_H
+#define __MALLOC_H
 
 #include <stddef.h>
 #include <types_ext.h>
@@ -20,6 +20,10 @@ void *realloc(void *ptr, size_t size);
 void *memalign(size_t alignment, size_t size);
 void free(void *ptr);
 
+#if __STDC_VERSION__ >= 201112L
+void *aligned_alloc(size_t alignment, size_t size);
+#endif
+
 #ifdef ENABLE_MDBG
 
 void *mdbg_malloc(const char *fname, int lineno, size_t size);
@@ -27,6 +31,11 @@ void *mdbg_calloc(const char *fname, int lineno, size_t nmemb, size_t size);
 void *mdbg_realloc(const char *fname, int lineno, void *ptr, size_t size);
 void *mdbg_memalign(const char *fname, int lineno, size_t alignment,
 		    size_t size);
+
+#if __STDC_VERSION__ >= 201112L
+void *mdbg_aligned_alloc(const char *fname, int lineno, size_t alignment,
+			 size_t size);
+#endif
 
 void mdbg_check(int bufdump);
 
@@ -37,6 +46,11 @@ void mdbg_check(int bufdump);
 		mdbg_realloc(__FILE__, __LINE__, (ptr), (size))
 #define memalign(alignment, size) \
 		mdbg_memalign(__FILE__, __LINE__, (alignment), (size))
+
+#if __STDC_VERSION__ >= 201112L
+#define aligned_alloc(alignment, size) \
+		mdbg_aligned_alloc(__FILE__, __LINE__, (alignment), (size))
+#endif /* __STDC_VERSION__ */
 
 #else
 
@@ -159,4 +173,4 @@ void raw_malloc_add_pool(struct malloc_ctx *ctx, void *buf, size_t len);
 void raw_malloc_get_stats(struct malloc_ctx *ctx, struct malloc_stats *stats);
 #endif
 
-#endif /* MALLOC_H */
+#endif /* __MALLOC_H */

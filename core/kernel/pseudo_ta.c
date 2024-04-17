@@ -245,7 +245,7 @@ static const struct ts_ops pseudo_ta_ops = {
 	.destroy = pseudo_ta_destroy,
 };
 
-bool is_pseudo_ta_ctx(struct ts_ctx *ctx)
+bool __noprof is_pseudo_ta_ctx(struct ts_ctx *ctx)
 {
 	return ctx->ops == &pseudo_ta_ops;
 }

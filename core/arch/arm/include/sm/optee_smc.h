@@ -549,6 +549,12 @@
  */
 #define OPTEE_SMC_ASYNC_NOTIF_VALUE_DO_BOTTOM_HALF	0
 
+/*
+ * Notification that OP-TEE triggers an interrupt event to Linux kernel
+ * for an interrupt consumer.
+ */
+#define OPTEE_SMC_ASYNC_NOTIF_VALUE_DO_IT		U(1)
+
 #define OPTEE_SMC_FUNCID_GET_ASYNC_NOTIF_VALUE	17
 #define OPTEE_SMC_GET_ASYNC_NOTIF_VALUE \
 	OPTEE_SMC_FAST_CALL_VAL(OPTEE_SMC_FUNCID_GET_ASYNC_NOTIF_VALUE)
@@ -558,6 +564,115 @@
 
 /* See OPTEE_SMC_CALL_WITH_REGD_ARG above */
 #define OPTEE_SMC_FUNCID_CALL_WITH_REGD_ARG	U(19)
+
+/*
+ * Retrieve a value of interrupt notifications pending since the last call
+ * of this function. Interrupt notification (IT_NOTIF) differs from ASYNC_NOTIF
+ * in that ASYNC_NOTIF allows non-secure world to wake or request a secure
+ * threaded execution while IT_NOTIF triggers an interrupt context event in the
+ * non-secure world, that is a event handler from a top half interrupt context.
+ *
+ * OP-TEE keeps a record of all posted values. When an interrupt is
+ * received by the REE, which indicates that there are posted values,
+ * this function should be called until all pended values have been retrieved.
+ * When a value is retrieved it's cleared from the record in secure world.
+ *
+ * It is expected that this function is called from an interrupt handler
+ * in normal world.
+ *
+ * Call requests usage:
+ * a0	SMC Function ID, OPTEE_SMC_GET_IT_NOTIF_VALUE
+ * a1-6	Not used
+ * a7	Hypervisor Client ID register
+ *
+ * Normal return register usage:
+ * a0	OPTEE_SMC_RETURN_OK
+ * a1	IT_NOTIF interrupt identifier value
+ * a2	Bit[0]: OPTEE_SMC_IT_NOTIF_VALUE_VALID if the value in a1 is
+ *		valid, else 0 if no values where pending
+ * a2	Bit[1]: OPTEE_SMC_IT_NOTIF_VALUE_PENDING if another value is
+ *		pending, else 0.
+ *	Bit[31:2]: MBZ
+ * a3-7	Preserved
+ *
+ * Not supported return register usage:
+ * a0	OPTEE_SMC_RETURN_ENOTAVAIL
+ * a1-7	Preserved
+ */
+#define OPTEE_SMC_IT_NOTIF_VALID	BIT(0)
+#define OPTEE_SMC_IT_NOTIF_PENDING	BIT(1)
+
+#define OPTEE_SMC_FUNCID_GET_IT_NOTIF_VALUE	U(53)
+#define OPTEE_SMC_GET_IT_NOTIF_VALUE \
+	OPTEE_SMC_FAST_CALL_VAL(OPTEE_SMC_FUNCID_GET_IT_NOTIF_VALUE)
+
+/*
+ * Mask or unmask an interrupt notification event.
+ *
+ * It is expected that this function is called from an interrupt handler
+ * in normal world.
+ *
+ * Call requests usage:
+ * a0	SMC Function ID, OPTEE_SMC_SET_IT_NOTIF_MASK
+ * a1	Interrupt identifer value
+ * a2	1 if interrupt is to be masked, 0 if interrupt is to be masked
+ * a3-6	Not used
+ * a7	Hypervisor Client ID register
+ *
+ * Normal return register usage:
+ * a0	OPTEE_SMC_RETURN_OK
+ * a1-7	Preserved
+ *
+ * Not supported return register usage:
+ * a0	OPTEE_SMC_RETURN_ENOTAVAIL
+ * a1-7	Preserved
+ */
+#define OPTEE_SMC_FUNCID_SET_IT_NOTIF_MASK	U(54)
+#define OPTEE_SMC_SET_IT_NOTIF_MASK \
+	OPTEE_SMC_FAST_CALL_VAL(OPTEE_SMC_FUNCID_SET_IT_NOTIF_MASK)
+
+/*
+ * Access to the secure watchdog.
+ *
+ * Call requests usage:
+ * a0	SMC Function ID, OPTEE_SMC_WATCHDOG
+ * a1	Watchdog command
+ *	0 : Init watchdog
+ *	1 : Set timeout
+ *	2 : Enable watchdog
+ *	3 : Ping the watchdog for refresh
+ *	4 : Get time left
+ * a2	if a1 == 1, the timeout value to set
+ *	if a1 == 2, 0 to stop the watchdog, 1 to enable it.
+ *	preserved otherwise
+ * a3-6	Not used
+ * a7	Hypervisor Client ID register
+ *
+ * Normal return register usage:
+ * a0 PSCI_RET_SUCCESS
+ * a1	if a1 == 0, the minimal timeout value supported by watchdog
+ *	if a1 == 4, the remaining time before watchdog expires
+ *	preserved otherwise.
+ * a2	if a1 == 0, the maximum timeout value supported by watchdog
+ *	preserved otherwise.
+ * a3-7	Preserved
+ *
+ * Error return:
+ * a0	PSCI_RET_NOT_SUPPORTED		Function not supported
+ *	PSCI_RET_INVALID_PARAMETERS	Invalid arguments
+ *	PSCI_RET_INTERNAL_FAILURE	Device error
+ * a1-7 Preserved
+ *
+ * By SMCCC convention:
+ * PSCI_RET_SUCCESS, OPTEE_SMC_RETURN_OK and ARM_SMCCC_RET_SUCCESS
+ * are equal.
+ * PSCI_RET_NOT_SUPPORTED, OPTEE_SMC_RETURN_UNKNOWN_FUNCTION and
+ * ARM_SMCCC_RET_NOT_SUPPORTED are equal.
+ *
+ */
+#define OPTEE_SMC_FUNCID_WATCHDOG		U(90)
+#define OPTEE_SMC_WATCHDOG \
+	OPTEE_SMC_FAST_CALL_VAL(OPTEE_SMC_FUNCID_WATCHDOG)
 
 /*
  * Resume from RPC (for example after processing a foreign interrupt)
@@ -687,6 +802,29 @@
 #define OPTEE_SMC_RPC_FUNC_CMD		U(5)
 #define OPTEE_SMC_RETURN_RPC_CMD \
 	OPTEE_SMC_RPC_VAL(OPTEE_SMC_RPC_FUNC_CMD)
+
+/*
+ * Do an OCall RPC request to caller client. The Ocall request ABI is very
+ * minimal: 2 input arguments and 2 output arguments. 1st output argument
+ * value 0 is reserved to error management requesting OCall termination.
+ * When 1st output argument is 0, 2nd output argument is either 0 or can
+ * carry a TEEC_Result like error code.
+ *
+ * "Call" register usage:
+ * a0	OPTEE_SMC_RETURN_RPC_OCALL2
+ * a1	OCall input argument 1 (32 bit)
+ * a2	OCall input argument 2 (32 bit)
+ * a3-7	Resume information, must be preserved
+ *
+ * "Return" register usage:
+ * a0	SMC Function ID, OPTEE_SMC_CALL_RETURN_FROM_RPC.
+ * a1	OCall output argument 1 (32 bit), value 0 upon error
+ * a2	OCall output argument 2 (32 bit), TEEC_Result error if @a1 is 0
+ * a3-7	Preserved
+ */
+#define OPTEE_SMC_RPC_FUNC_OCALL2		U(2048)
+#define OPTEE_SMC_RETURN_RPC_OCALL2 \
+	OPTEE_SMC_RPC_VAL(OPTEE_SMC_RPC_FUNC_OCALL2)
 
 /* Returned in a0 */
 #define OPTEE_SMC_RETURN_UNKNOWN_FUNCTION U(0xFFFFFFFF)

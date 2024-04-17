@@ -169,8 +169,8 @@ static TEE_Result do_allocate_keypair(struct ecc_keypair *key, size_t size_bits)
 err:
 	ECC_TRACE("Allocation error");
 
-	crypto_bignum_free(key->d);
-	crypto_bignum_free(key->x);
+	crypto_bignum_free(&key->d);
+	crypto_bignum_free(&key->x);
 
 	return TEE_ERROR_OUT_OF_MEMORY;
 }
@@ -204,7 +204,7 @@ static TEE_Result do_allocate_publickey(struct ecc_public_key *key,
 err:
 	ECC_TRACE("Allocation error");
 
-	crypto_bignum_free(key->x);
+	crypto_bignum_free(&key->x);
 
 	return TEE_ERROR_OUT_OF_MEMORY;
 }
@@ -216,8 +216,8 @@ err:
  */
 static void do_free_publickey(struct ecc_public_key *key)
 {
-	crypto_bignum_free(key->x);
-	crypto_bignum_free(key->y);
+	crypto_bignum_free(&key->x);
+	crypto_bignum_free(&key->y);
 }
 
 /*

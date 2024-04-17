@@ -335,9 +335,9 @@ static void user_ta_gprof_set_status(enum ts_gprof_status status)
 }
 #endif /*CFG_TA_GPROF_SUPPORT*/
 
-static void free_utc(struct user_ta_ctx *utc)
-{
 
+static void release_utc_state(struct user_ta_ctx *utc)
+{
 	/*
 	 * Close sessions opened by this TA
 	 * Note that tee_ta_close_session() removes the item
@@ -356,7 +356,17 @@ static void free_utc(struct user_ta_ctx *utc)
 	tee_obj_close_all(utc);
 	/* Free emums created by this TA */
 	tee_svc_storage_close_all_enum(utc);
+}
+
+static void free_utc(struct user_ta_ctx *utc)
+{
+	release_utc_state(utc);
 	free(utc);
+}
+
+static void user_ta_release_state(struct ts_ctx *ctx)
+{
+	release_utc_state(to_user_ta_ctx(ctx));
 }
 
 static void user_ta_ctx_destroy(struct ts_ctx *ctx)
@@ -381,6 +391,7 @@ const struct ts_ops user_ta_ops __weak __relrodata_unpaged("user_ta_ops") = {
 #ifdef CFG_FTRACE_SUPPORT
 	.dump_ftrace = user_ta_dump_ftrace,
 #endif
+	.release_state = user_ta_release_state,
 	.destroy = user_ta_ctx_destroy,
 	.get_instance_id = user_ta_get_instance_id,
 	.handle_svc = user_ta_handle_svc,
@@ -394,7 +405,7 @@ static void set_ta_ctx_ops(struct tee_ta_ctx *ctx)
 	ctx->ts_ctx.ops = &user_ta_ops;
 }
 
-bool is_user_ta_ctx(struct ts_ctx *ctx)
+bool __noprof is_user_ta_ctx(struct ts_ctx *ctx)
 {
 	return ctx && ctx->ops == &user_ta_ops;
 }

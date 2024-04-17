@@ -11,6 +11,7 @@
 #include <kernel/stmm_sp.h>
 #include <kernel/thread_private.h>
 #include <kernel/user_mode_ctx.h>
+#include <mempool.h>
 #include <mm/fobj.h>
 #include <mm/mobj.h>
 #include <mm/vm.h>
@@ -111,7 +112,18 @@ static TEE_Result stmm_enter_user_mode(struct stmm_ctx *spc)
 	exceptions = thread_mask_exceptions(THREAD_EXCP_ALL);
 	cntkctl = read_cntkctl();
 	write_cntkctl(cntkctl | CNTKCTL_PL0PCTEN);
+
+#ifdef ARM32
+	/* Handle usr_lr in place of __thread_enter_user_mode() */
+	thread_set_usr_lr(spc->regs.usr_lr);
+#endif
+
 	__thread_enter_user_mode(&spc->regs, &panicked, &panic_code);
+
+#ifdef ARM32
+	spc->regs.usr_lr = thread_get_usr_lr();
+#endif
+
 	write_cntkctl(cntkctl);
 	thread_unmask_exceptions(exceptions);
 
@@ -184,12 +196,12 @@ static TEE_Result alloc_and_map_sp_fobj(struct stmm_ctx *spc, size_t sz,
 static void *zalloc(void *opaque __unused, unsigned int items,
 		    unsigned int size)
 {
-	return malloc(items * size);
+	return mempool_alloc(mempool_default, items * size);
 }
 
 static void zfree(void *opaque __unused, void *address)
 {
-	free(address);
+	mempool_free(mempool_default, address);
 }
 
 static void uncompress_image(void *dst, size_t dst_size, void *src,

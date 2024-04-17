@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: (GPL-2.0 OR BSD-3-Clause)
 /*
- * Copyright (c) 2017-2019, STMicroelectronics
+ * Copyright (c) 2017-2024, STMicroelectronics
  *
  * The driver API is defined in header file stm32_i2c.h.
  *
@@ -10,13 +10,16 @@
  */
 
 #include <arm.h>
+#include <config.h>
 #include <drivers/clk.h>
 #include <drivers/clk_dt.h>
 #include <drivers/stm32_i2c.h>
 #include <io.h>
+#include <kernel/boot.h>
 #include <kernel/delay.h>
 #include <kernel/dt.h>
-#include <kernel/boot.h>
+#include <kernel/dt_driver.h>
+#include <kernel/mutex_pm_aware.h>
 #include <kernel/panic.h>
 #include <libfdt.h>
 #include <stdbool.h>
@@ -291,6 +294,9 @@ struct i2c_request {
 	unsigned int timeout_ms;
 };
 
+/* Non-null reference for compat data */
+static const bool secure_i2c_r;
+
 static vaddr_t get_base(struct i2c_handle_s *hi2c)
 {
 	return io_pa_or_va_secure(&hi2c->base, hi2c->reg_size);
@@ -377,12 +383,12 @@ static void __maybe_unused dump_i2c(struct i2c_handle_s *hi2c)
  * @timing: Pointer to the final computed timing result
  * Return 0 on success or a negative value
  */
-static int i2c_compute_timing(struct stm32_i2c_init_s *init,
+static int i2c_compute_timing(struct stm32_i2c_platform_data *init,
 			      unsigned long clock_src, uint32_t *timing)
 {
 	const struct i2c_spec_s *specs = NULL;
 	uint32_t speed_freq = 0;
-	uint32_t i2cbus = UDIV_ROUND_NEAREST(I2C_NSEC_PER_SEC, speed_freq);
+	uint32_t i2cbus = 0;
 	uint32_t i2cclk = UDIV_ROUND_NEAREST(I2C_NSEC_PER_SEC, clock_src);
 	uint32_t p_prev = I2C_TIMINGR_PRESC_MAX;
 	uint32_t af_delay_min = 0;
@@ -593,7 +599,7 @@ static uint32_t get_lower_rate(uint32_t rate)
  * @retval 0 if OK, negative value else
  */
 static int i2c_setup_timing(struct i2c_handle_s *hi2c,
-			    struct stm32_i2c_init_s *init,
+			    struct stm32_i2c_platform_data *init,
 			    uint32_t *timing)
 {
 	int rc = 0;
@@ -682,15 +688,13 @@ static int i2c_config_analog_filter(struct i2c_handle_s *hi2c,
 	return 0;
 }
 
-TEE_Result stm32_i2c_get_setup_from_fdt(void *fdt, int node,
-					struct stm32_i2c_init_s *init,
-					struct stm32_pinctrl **pinctrl,
-					size_t *pinctrl_count)
+TEE_Result stm32_i2c_get_setup_from_fdt(const void *fdt, int node,
+					struct stm32_i2c_platform_data *init,
+					struct stm32_pinctrl_list **pinctrl)
 {
 	TEE_Result res = TEE_ERROR_GENERIC;
 	const fdt32_t *cuint = NULL;
 	struct dt_node_info info = { .status = 0 };
-	int count = 0;
 
 	/* Default STM32 specific configs caller may need to overwrite */
 	memset(init, 0, sizeof(*init));
@@ -704,6 +708,10 @@ TEE_Result stm32_i2c_get_setup_from_fdt(void *fdt, int node,
 	init->reg_size = info.reg_size;
 
 	res = clk_dt_get_by_index(fdt, node, 0, &init->clock);
+	if (res)
+		return res;
+
+	res = stm32_pinctrl_dt_get_by_index(fdt, node, 0, pinctrl);
 	if (res)
 		return res;
 
@@ -732,44 +740,21 @@ TEE_Result stm32_i2c_get_setup_from_fdt(void *fdt, int node,
 		init->bus_rate = I2C_STANDARD_RATE;
 	}
 
-	count = stm32_pinctrl_fdt_get_pinctrl(fdt, node, NULL, 0);
-	if (count <= 0) {
-		*pinctrl = NULL;
-		*pinctrl_count = count;
-		DMSG("Failed to get pinctrl: FDT errno %d", count);
-		return TEE_ERROR_GENERIC;
-	}
-
-	if (count > 2) {
-		DMSG("Too many PINCTRLs found: %zd", count);
-		return TEE_ERROR_GENERIC;
-	}
-
-	*pinctrl = calloc(count, sizeof(**pinctrl));
-	if (!*pinctrl)
-		return TEE_ERROR_OUT_OF_MEMORY;
-
-	*pinctrl_count = stm32_pinctrl_fdt_get_pinctrl(fdt, node,
-						       *pinctrl, count);
-	assert(*pinctrl_count == (unsigned int)count);
 
 	return TEE_SUCCESS;
 }
 
 int stm32_i2c_init(struct i2c_handle_s *hi2c,
-		   struct stm32_i2c_init_s *init_data)
+		   struct stm32_i2c_platform_data *i2c_pdata)
 {
 	int rc = 0;
 	uint32_t timing = 0;
 	vaddr_t base = 0;
 	uint32_t val = 0;
 
-	hi2c->dt_status = init_data->dt_status;
-	hi2c->base.pa = init_data->pbase;
-	hi2c->reg_size = init_data->reg_size;
-	hi2c->clock = init_data->clock;
+	mutex_pm_aware_init(&hi2c->mu);
 
-	rc = i2c_setup_timing(hi2c, init_data, &timing);
+	rc = i2c_setup_timing(hi2c, i2c_pdata, &timing);
 	if (rc)
 		return rc;
 
@@ -788,17 +773,17 @@ int stm32_i2c_init(struct i2c_handle_s *hi2c,
 	io_write32(base + I2C_OAR1, 0);
 
 	/* Configure I2Cx: Own Address1 and ack own address1 mode */
-	if (init_data->addr_mode_10b_not_7b)
+	if (i2c_pdata->addr_mode_10b_not_7b)
 		io_write32(base + I2C_OAR1,
 			   I2C_OAR1_OA1EN | I2C_OAR1_OA1MODE |
-			   init_data->own_address1);
+			   i2c_pdata->own_address1);
 	else
 		io_write32(base + I2C_OAR1,
-			   I2C_OAR1_OA1EN | init_data->own_address1);
+			   I2C_OAR1_OA1EN | i2c_pdata->own_address1);
 
 	/* Configure I2Cx: Addressing Master mode */
 	io_write32(base + I2C_CR2, 0);
-	if (init_data->addr_mode_10b_not_7b)
+	if (i2c_pdata->addr_mode_10b_not_7b)
 		io_setbits32(base + I2C_CR2, I2C_CR2_ADD10);
 
 	/*
@@ -811,16 +796,16 @@ int stm32_i2c_init(struct i2c_handle_s *hi2c,
 	io_write32(base + I2C_OAR2, 0);
 
 	/* Configure I2Cx: Dual mode and Own Address2 */
-	if (init_data->dual_address_mode)
+	if (i2c_pdata->dual_address_mode)
 		io_write32(base + I2C_OAR2,
-			   I2C_OAR2_OA2EN | init_data->own_address2 |
-			   (init_data->own_address2_masks << 8));
+			   I2C_OAR2_OA2EN | i2c_pdata->own_address2 |
+			   (i2c_pdata->own_address2_masks << 8));
 
 	/* Configure I2Cx: Generalcall and NoStretch mode */
 	val = 0;
-	if (init_data->general_call_mode)
+	if (i2c_pdata->general_call_mode)
 		val |= I2C_CR1_GCEN;
-	if (init_data->no_stretch_mode)
+	if (i2c_pdata->no_stretch_mode)
 		val |= I2C_CR1_NOSTRETCH;
 	io_write32(base + I2C_CR1, val);
 
@@ -830,13 +815,9 @@ int stm32_i2c_init(struct i2c_handle_s *hi2c,
 	hi2c->i2c_err = I2C_ERROR_NONE;
 	hi2c->i2c_state = I2C_STATE_READY;
 
-	rc = i2c_config_analog_filter(hi2c, init_data->analog_filter);
+	rc = i2c_config_analog_filter(hi2c, i2c_pdata->analog_filter);
 	if (rc)
 		DMSG("I2C analog filter error %d", rc);
-
-	if (IS_ENABLED(CFG_STM32MP13))
-		stm32_gpio_set_secure_cfg(hi2c->pinctrl->bank,
-					  hi2c->pinctrl->pin, true);
 
 	clk_disable(hi2c->clock);
 
@@ -1087,11 +1068,15 @@ static int i2c_write(struct i2c_handle_s *hi2c, struct i2c_request *request,
 	if (request->mode != I2C_MODE_MASTER && request->mode != I2C_MODE_MEM)
 		return -1;
 
-	if (hi2c->i2c_state != I2C_STATE_READY)
-		return -1;
-
 	if (!p_data || !size)
 		return -1;
+
+	mutex_pm_aware_lock(&hi2c->mu);
+
+	if (hi2c->i2c_state != I2C_STATE_READY) {
+		mutex_pm_aware_unlock(&hi2c->mu);
+		return -1;
+	}
 
 	clk_enable(hi2c->clock);
 
@@ -1181,6 +1166,7 @@ static int i2c_write(struct i2c_handle_s *hi2c, struct i2c_request *request,
 
 bail:
 	clk_disable(hi2c->clock);
+	mutex_pm_aware_unlock(&hi2c->mu);
 
 	return rc;
 }
@@ -1223,8 +1209,12 @@ int stm32_i2c_read_write_membyte(struct i2c_handle_s *hi2c, uint16_t dev_addr,
 	uint8_t *p_buff = p_data;
 	uint32_t event_mask = 0;
 
-	if (hi2c->i2c_state != I2C_STATE_READY || !p_data)
+	mutex_pm_aware_lock(&hi2c->mu);
+
+	if (hi2c->i2c_state != I2C_STATE_READY || !p_data) {
+		mutex_pm_aware_unlock(&hi2c->mu);
 		return -1;
+	}
 
 	clk_enable(hi2c->clock);
 
@@ -1284,6 +1274,7 @@ int stm32_i2c_read_write_membyte(struct i2c_handle_s *hi2c, uint16_t dev_addr,
 
 bail:
 	clk_disable(hi2c->clock);
+	mutex_pm_aware_unlock(&hi2c->mu);
 
 	return rc;
 }
@@ -1310,11 +1301,15 @@ static int i2c_read(struct i2c_handle_s *hi2c, struct i2c_request *request,
 	if (request->mode != I2C_MODE_MASTER && request->mode != I2C_MODE_MEM)
 		return -1;
 
-	if (hi2c->i2c_state != I2C_STATE_READY)
-		return -1;
-
 	if (!p_data || !size)
 		return -1;
+
+	mutex_pm_aware_lock(&hi2c->mu);
+
+	if (hi2c->i2c_state != I2C_STATE_READY) {
+		mutex_pm_aware_unlock(&hi2c->mu);
+		return -1;
+	}
 
 	clk_enable(hi2c->clock);
 
@@ -1399,6 +1394,7 @@ static int i2c_read(struct i2c_handle_s *hi2c, struct i2c_request *request,
 
 bail:
 	clk_disable(hi2c->clock);
+	mutex_pm_aware_unlock(&hi2c->mu);
 
 	return rc;
 }
@@ -1438,8 +1434,12 @@ bool stm32_i2c_is_device_ready(struct i2c_handle_s *hi2c, uint32_t dev_addr,
 	unsigned int i2c_trials = 0U;
 	bool rc = false;
 
-	if (hi2c->i2c_state != I2C_STATE_READY)
+	mutex_pm_aware_lock(&hi2c->mu);
+
+	if (hi2c->i2c_state != I2C_STATE_READY) {
+		mutex_pm_aware_unlock(&hi2c->mu);
 		return rc;
+	}
 
 	clk_enable(hi2c->clock);
 
@@ -1514,6 +1514,7 @@ bool stm32_i2c_is_device_ready(struct i2c_handle_s *hi2c, uint32_t dev_addr,
 
 bail:
 	clk_disable(hi2c->clock);
+	mutex_pm_aware_unlock(&hi2c->mu);
 
 	return rc;
 }
@@ -1527,18 +1528,15 @@ void stm32_i2c_resume(struct i2c_handle_s *hi2c)
 	    (hi2c->i2c_state != I2C_STATE_SUSPENDED))
 		panic();
 
-	stm32_pinctrl_load_active_cfg(hi2c->pinctrl, hi2c->pinctrl_count);
-
 	if (hi2c->i2c_state == I2C_STATE_RESET) {
 		/* There is no valid I2C configuration to be loaded yet */
 		return;
 	}
 
-	restore_cfg(hi2c, &hi2c->sec_cfg);
+	if (!hi2c->secure_i2c)
+		stm32_pinctrl_load_config(hi2c->pinctrl_list);
 
-	if (IS_ENABLED(CFG_STM32MP13))
-		stm32_gpio_set_secure_cfg(hi2c->pinctrl->bank,
-					  hi2c->pinctrl->pin, true);
+	restore_cfg(hi2c, &hi2c->sec_cfg);
 
 	hi2c->i2c_state = I2C_STATE_READY;
 }
@@ -1552,7 +1550,116 @@ void stm32_i2c_suspend(struct i2c_handle_s *hi2c)
 		panic();
 
 	save_cfg(hi2c, &hi2c->sec_cfg);
-	stm32_pinctrl_load_standby_cfg(hi2c->pinctrl, hi2c->pinctrl_count);
 
 	hi2c->i2c_state = I2C_STATE_SUSPENDED;
 }
+
+static struct i2c_handle_s *
+stm32_get_i2c_handle(struct dt_pargs *pargs __unused, void *data,
+		     TEE_Result *res)
+{
+	*res = TEE_SUCCESS;
+	return (struct i2c_handle_s *)data;
+}
+
+TEE_Result i2c_dt_get_by_subnode(const void *fdt, int child_node,
+				 struct i2c_handle_s **child_handle)
+{
+	TEE_Result res = TEE_SUCCESS;
+	int node = 0;
+
+	node = fdt_parent_offset(fdt, child_node);
+	if (node < 0)
+		return TEE_ERROR_ITEM_NOT_FOUND;
+
+	*child_handle = (struct i2c_handle_s *)
+			dt_driver_device_from_node(node, DT_DRIVER_I2C, &res);
+
+	return res;
+}
+
+static TEE_Result stm32_i2c_probe(const void *fdt, int node,
+				  const void *compat_data __unused)
+{
+	TEE_Result res = TEE_SUCCESS;
+	int subnode = 0;
+	struct i2c_handle_s *i2c_handle_p = NULL;
+	struct stm32_pinctrl_list *pinctrl_l = NULL;
+	struct stm32_i2c_platform_data i2c_pdata = { };
+
+	res = stm32_i2c_get_setup_from_fdt(fdt, node, &i2c_pdata, &pinctrl_l);
+	if (res)
+		return res;
+
+	i2c_handle_p = calloc(1, sizeof(struct i2c_handle_s));
+	if (!i2c_handle_p)
+		return TEE_ERROR_OUT_OF_MEMORY;
+
+	i2c_handle_p->dt_status = i2c_pdata.dt_status;
+	i2c_handle_p->reg_size = i2c_pdata.reg_size;
+	i2c_handle_p->clock = i2c_pdata.clock;
+	i2c_handle_p->base.pa = i2c_pdata.pbase;
+	i2c_handle_p->base.va = io_pa_or_va(&i2c_handle_p->base,
+					    i2c_pdata.reg_size);
+	assert(i2c_handle_p->base.va);
+	i2c_handle_p->clock = i2c_pdata.clock;
+	i2c_handle_p->i2c_state = I2C_STATE_RESET;
+	i2c_handle_p->pinctrl_list = pinctrl_l;
+
+	i2c_pdata.analog_filter = true;
+	i2c_pdata.digital_filter_coef = 0;
+
+	if (compat_data == &secure_i2c_r) {
+		i2c_handle_p->secure_i2c = true;
+		res = stm32_pinctrl_set_secure_cfg(pinctrl_l, true);
+		if (res)
+			return res;
+	}
+
+	res = stm32_i2c_init(i2c_handle_p, &i2c_pdata);
+	if (res)
+		panic("Couldn't initialise I2C");
+
+	res = i2c_register_provider(fdt, node, stm32_get_i2c_handle,
+				    i2c_handle_p);
+	if (res)
+		panic("Couldn't register I2C provider");
+
+	fdt_for_each_subnode(subnode, fdt, node) {
+		res = dt_driver_maybe_add_probe_node(fdt, subnode);
+		if (res) {
+			EMSG("Failed on node %s with %#"PRIx32,
+			     fdt_get_name(fdt, subnode, NULL), res);
+			panic();
+		}
+	}
+
+	return res;
+}
+
+static const struct dt_device_match stm32_i2c_match_table[] = {
+	{
+		.compatible = "st,stm32mp15-i2c",
+		.compat_data = &secure_i2c_r
+	},
+	{
+		.compatible = "st,stm32mp13-i2c",
+		.compat_data = &secure_i2c_r
+	},
+	{
+		.compatible = "st,stm32mp25-i2c",
+		.compat_data = &secure_i2c_r
+	},
+	{
+		.compatible = "st,stm32mp15-i2c-non-secure",
+		.compat_data = NULL
+	},
+	{ }
+};
+
+DEFINE_DT_DRIVER(stm32_i2c_dt_driver) = {
+	.name = "stm32_i2c",
+	.match_table = stm32_i2c_match_table,
+	.probe = stm32_i2c_probe,
+	.type = DT_DRIVER_I2C
+};

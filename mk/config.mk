@@ -109,6 +109,18 @@ CFG_MSG_LONG_PREFIX_MASK ?= 0x1a
 # Otherwise, you need to implement hw_get_random_bytes() for your platform
 CFG_WITH_SOFTWARE_PRNG ?= y
 
+# TRNG configuration
+# CFG_WITH_TRNG is exclusively enabled towards CFG_WITH_SOFTWARE_PRNG
+ifneq ($(CFG_WITH_SOFTWARE_PRNG),y)
+CFG_WITH_TRNG ?= y
+else
+CFG_WITH_TRNG ?= n
+endif
+
+ifeq ($(call cfg-all-enabled,CFG_WITH_SOFTWARE_PRNG CFG_WITH_TRNG),y)
+$(error CFG_WITH_SOFTWARE_PRNG and CFG_WITH_TRNG are exclusive)
+endif
+
 # Number of threads
 CFG_NUM_THREADS ?= 2
 
@@ -131,7 +143,7 @@ CFG_OPTEE_REVISION_MINOR ?= 19
 CFG_OPTEE_REVISION_EXTRA ?=
 
 # Trusted OS implementation version
-TEE_IMPL_VERSION ?= $(shell git describe --always --dirty=-dev 2>/dev/null || \
+TEE_IMPL_VERSION ?= $(shell git describe --always --tags --dirty=-dev 2>/dev/null || \
 		      echo Unknown_$(CFG_OPTEE_REVISION_MAJOR).$(CFG_OPTEE_REVISION_MINOR))$(CFG_OPTEE_REVISION_EXTRA)
 ifeq ($(CFG_OS_REV_REPORTS_GIT_SHA1),y)
 TEE_IMPL_GIT_SHA1 := 0x$(shell git rev-parse --short=8 HEAD 2>/dev/null || echo 0)
@@ -720,8 +732,10 @@ CFG_CORE_TPM_EVENT_LOG ?= n
 #
 # CFG_SCMI_MSG_CLOCK embeds SCMI clock protocol support.
 # CFG_SCMI_MSG_RESET_DOMAIN embeds SCMI reset domain protocol support.
+# CFG_SCMI_MSG_REGULATOR_CONSUMER uses DT to list regulators exposed thru SCMI
 # CFG_SCMI_MSG_SMT embeds a SMT header in shared device memory buffers
 # CFG_SCMI_MSG_VOLTAGE_DOMAIN embeds SCMI voltage domain protocol support.
+# CFG_SCMI_MSG_PERF_DOMAIN embeds SCMI performance domain management protocol
 # CFG_SCMI_MSG_SMT_FASTCALL_ENTRY embeds fastcall SMC entry with SMT memory
 # CFG_SCMI_MSG_SMT_INTERRUPT_ENTRY embeds interrupt entry with SMT memory
 # CFG_SCMI_MSG_SMT_THREAD_ENTRY embeds threaded entry with SMT memory
@@ -736,14 +750,63 @@ CFG_SCMI_MSG_SMT_FASTCALL_ENTRY ?= n
 CFG_SCMI_MSG_SMT_INTERRUPT_ENTRY ?= n
 CFG_SCMI_MSG_SMT_THREAD_ENTRY ?= n
 CFG_SCMI_MSG_THREAD_ENTRY ?= n
+CFG_SCMI_MSG_REGULATOR_CONSUMER ?= n
 CFG_SCMI_MSG_VOLTAGE_DOMAIN ?= n
+CFG_SCMI_MSG_PERF_DOMAIN ?=n
 $(eval $(call cfg-depends-all,CFG_SCMI_MSG_SMT_FASTCALL_ENTRY,CFG_SCMI_MSG_SMT))
 $(eval $(call cfg-depends-all,CFG_SCMI_MSG_SMT_INTERRUPT_ENTRY,CFG_SCMI_MSG_SMT))
 $(eval $(call cfg-depends-one,CFG_SCMI_MSG_SMT_THREAD_ENTRY,CFG_SCMI_MSG_SMT CFG_SCMI_MSG_SHM_MSG))
+ifeq ($(CFG_SCMI_MSG_SMT),y)
+_CFG_SCMI_PTA_SMT_HEADER := y
+endif
+ifeq ($(CFG_SCMI_MSG_SHM_MSG),y)
+_CFG_SCMI_PTA_MSG_HEADER := y
+endif
+endif
+
+# CFG_SCMI_SCPFW, when enabled, embeds the reference SCMI server implementation
+# from SCP-firmware package as an built-in SCMI stack in core. This
+# configuration mandates target product identifier is configured with
+# CFG_SCMI_SCPFW_PRODUCT and the SCP-firmware source tree path with
+# CFG_SCP_FIRMWARE.
+CFG_SCMI_SCPFW ?= n
+
+ifeq ($(CFG_SCMI_SCPFW),y)
+$(call force,CFG_SCMI_PTA,y,Required by CFG_SCMI_SCPFW)
+ifeq (,$(CFG_SCMI_SCPFW_PRODUCT))
+$(error CFG_SCMI_SCPFW=y requires CFG_SCMI_SCPFW_PRODUCT configuration)
+endif
+ifeq (,$(CFG_SCP_FIRMWARE))
+$(call force,_CFG_SCP_FIRMWARE_IN_TREE,y)
+endif #CFG_SCP_FIRMWARE empty
+
+ifeq ($(_CFG_SCP_FIRMWARE_IN_TREE),y)
+ifeq (,$(wildcard core/lib/scmi-server/SCP-firmware/CMakeLists.txt))
+$(info WARNING: CFG_SCMI_SCPFW=y without CFG_SCP_FIRMWARE value expects SCP-firmware source tree at core/lib/scmi-serve/SCP-firmware/)
+$(info WARNING: or get SCP-firmware source tree and set its absolute path in CFG_SCP_FIRMWARE.)
+$(error CFG_SCMI_SCPFW=y but cannot find the location of SCP-firmware source tree)
+endif
+else #_CFG_SCP_FIRMWARE_IN_TREE
+ifeq (,$(wildcard $(CFG_SCP_FIRMWARE)/CMakeLists.txt))
+$(info WARNING: Invalid config SCP-firmware source tree absolute path CFG_SCP_FIRMWARE=$(CFG_SCP_FIRMWARE))
+$(error CFG_SCMI_SCPFW=y but CFG_SCP_FIRMWARE does not seems to provide the source tree location)
+endif
+endif #_CFG_SCP_FIRMWARE_IN_TREE
+endif #CFG_SCMI_SCPFW
+
+ifeq ($(CFG_SCMI_MSG_DRIVERS)-$(CFG_SCMI_SCPFW),y-y)
+$(error CFG_SCMI_MSG_DRIVERS=y and CFG_SCMI_SCPFW=y are mutually exclusive)
 endif
 
 # Enable SCMI PTA interface for REE SCMI agents
 CFG_SCMI_PTA ?= n
+ifeq ($(CFG_SCMI_PTA),y)
+_CFG_SCMI_PTA_SMT_HEADER ?= n
+_CFG_SCMI_PTA_MSG_HEADER ?= n
+endif
+
+# Enable Trusted User Interface
+CFG_WITH_TUI ?= n
 
 ifneq ($(CFG_STMM_PATH),)
 $(call force,CFG_WITH_STMM_SP,y)
@@ -804,6 +867,10 @@ $(eval $(call cfg-depends-all,CFG_DRIVERS_CLK_FIXED,CFG_DRIVERS_CLK_DT))
 # When enabled, CFG_DRIVERS_RSTCTRL embeds a reset controller framework in
 # OP-TEE core to provide reset controls on subsystems of the devices.
 CFG_DRIVERS_RSTCTRL ?= n
+
+# When enabled, CFG_DRIVERS_NVMEM provides a framework to register nvmem
+# providers and allow consumer drivers to get NVMEM cells using the Device Tree.
+CFG_DRIVERS_NVMEM ?= n
 
 # The purpose of this flag is to show a print when booting up the device that
 # indicates whether the board runs a standard developer configuration or not.
@@ -901,13 +968,11 @@ endif
 CFG_WDT ?= n
 
 # Enable watchdog SMC handling compatible with arm-smc-wdt Linux driver
-# When enabled, CFG_WDT_SM_HANDLER_ID must be defined with a SMC ID
+# When enabled, CFG_WDT_SM_HANDLER_ID could be defined to override
+# OPTEE_SMC_WATCHDOG ID
 CFG_WDT_SM_HANDLER ?= n
 
 $(eval $(call cfg-enable-all-depends,CFG_WDT_SM_HANDLER,CFG_WDT))
-ifeq (y-,$(CFG_WDT_SM_HANDLER)-$(CFG_WDT_SM_HANDLER_ID))
-$(error CFG_WDT_SM_HANDLER_ID must be defined when enabling CFG_WDT_SM_HANDLER)
-endif
 
 # Allow using the udelay/mdelay function for platforms without ARM generic timer
 # extension. When set to 'n', the plat_get_freq() function must be defined by
@@ -936,3 +1001,11 @@ CFG_CORE_PREALLOC_EL0_TBLS ?= n
 ifeq (y-y,$(CFG_CORE_PREALLOC_EL0_TBLS)-$(CFG_WITH_PAGER))
 $(error "CFG_WITH_PAGER can't support CFG_CORE_PREALLOC_EL0_TBLS")
 endif
+
+
+# CFG_DRIVERS_REMOTEPROC, when enabled, embeds support for remote processor
+# management including generic DT bindings for the configuration.
+CFG_DRIVERS_REMOTEPROC ?= n
+# CFG_REMOTEPROC_PTA, when enabled, embeds remote processor management PTA
+# service.
+CFG_REMOTEPROC_PTA ?= n

@@ -6,8 +6,9 @@
 
 #include "stm32mp15-pinctrl.dtsi"
 #include "stm32mp15xxaa-pinctrl.dtsi"
-#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/gpio/stm32mp_gpio.h>
 #include <dt-bindings/mfd/st,stpmic1.h>
+#include <dt-bindings/soc/stm32mp-provisioning.h>
 
 / {
 	aliases {
@@ -27,33 +28,21 @@
 		#size-cells = <1>;
 		ranges;
 
-		mcuram2: mcuram2@10000000 {
+		mcusram1: mcuram@10000000 {
 			compatible = "shared-dma-pool";
-			reg = <0x10000000 0x40000>;
+			reg = <0x10000000 0x20000>;
 			no-map;
 		};
 
-		vdev0vring0: vdev0vring0@10040000 {
+		mcusram2: mcuram@10020000 {
 			compatible = "shared-dma-pool";
-			reg = <0x10040000 0x1000>;
+			reg = <0x10020000 0x20000>;
 			no-map;
 		};
 
-		vdev0vring1: vdev0vring1@10041000 {
+		mcusram3: mcuram@10040000 {
 			compatible = "shared-dma-pool";
-			reg = <0x10041000 0x1000>;
-			no-map;
-		};
-
-		vdev0buffer: vdev0buffer@10042000 {
-			compatible = "shared-dma-pool";
-			reg = <0x10042000 0x4000>;
-			no-map;
-		};
-
-		mcuram: mcuram@30000000 {
-			compatible = "shared-dma-pool";
-			reg = <0x30000000 0x40000>;
+			reg = <0x10040000 0x10000>;
 			no-map;
 		};
 
@@ -61,6 +50,15 @@
 			compatible = "shared-dma-pool";
 			reg = <0x38000000 0x10000>;
 			no-map;
+		};
+	};
+
+	shadow-prov {
+		compatible = "st,provisioning";
+		hw2_prov {
+			nvmem-cells = <&hw2_otp>;
+			st,shadow-value = <0x000001E0>;
+			st,shadow-lock = <STICKY_LOCK_SR>;
 		};
 	};
 
@@ -414,8 +412,7 @@
 };
 
 &m4_rproc {
-	memory-region = <&retram>, <&mcuram>, <&mcuram2>, <&vdev0vring0>,
-			<&vdev0vring1>, <&vdev0buffer>;
+	memory-region = <&retram>, <&mcusram1>, <&mcusram2>, <&mcusram3>;
 	mboxes = <&ipcc 0>, <&ipcc 1>, <&ipcc 2>;
 	mbox-names = "vq0", "vq1", "shutdown";
 	interrupt-parent = <&exti>;

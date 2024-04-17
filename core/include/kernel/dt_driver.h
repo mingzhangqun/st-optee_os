@@ -2,7 +2,6 @@
 /*
  * Copyright (c) 2021, Linaro Limited
  * Copyright (c) 2021, Bootlin
- * Copyright (c) 2021, Linaro Limited
  * Copyright (c) 2021, STMicroelectronics
  */
 
@@ -18,11 +17,15 @@
 struct dt_driver_provider;
 
 /**
- * struct dt_driver_phandle_args - Devicetree phandle arguments
+ * struct dt_pargs - Devicetree phandle arguments
+ * @fdt: Device-tree to work on
+ * @phandle_node: Node pointed by the specifier phandle
  * @args_count: Count of cells for the device
  * @args: Device consumer specifiers
  */
-struct dt_driver_phandle_args {
+struct dt_pargs {
+	const void *fdt;
+	int phandle_node;
 	int args_count;
 	uint32_t args[];
 };
@@ -42,8 +45,8 @@ struct dt_driver_phandle_args {
  * Return a device opaque reference, e.g. a struct clk pointer for a clock
  * driver, or NULL if not found in which case @res provides the error code.
  */
-typedef void *(*get_of_device_func)(struct dt_driver_phandle_args *parg,
-				    void *data, TEE_Result *res);
+typedef void *(*get_of_device_func)(struct dt_pargs *parg, void *data,
+				    TEE_Result *res);
 
 /**
  * dt_driver_register_provider - Register a driver provider
@@ -74,6 +77,7 @@ TEE_Result dt_driver_register_provider(const void *fdt, int nodeoffset,
  * @res: Output result code of the operation:
  *	TEE_SUCCESS in case of success
  *	TEE_ERROR_DEFER_DRIVER_INIT if clock is not initialized
+ *	TEE_ERROR_ITEM_NOT_FOUND if prop_name does not match a property's name
  *	Any TEE_Result compliant code in case of error.
  *
  * Return a device opaque reference, e.g. a struct clk pointer for a clock
@@ -99,6 +103,23 @@ void dt_driver_crypt_init_complete(void);
 #else
 static inline void dt_driver_crypt_init_complete(void) {}
 #endif
+
+/*
+ * dt_driver_device_from_node - Return a device instance based on a
+ * driver type and FDT information
+ *
+ * @nodeoffset: node offset in the FDT
+ * @type: Driver type
+ * @res: Output result code of the operation: TEE_ERROR_DEFER_DRIVER_INIT
+ *	 is target device is not yet initialized, otherwise any other compliant
+ *	 code.
+ *
+ * Return a device opaque reference, e.g. a struct i2c_handle_s pointer
+ * for an I2C driver, or NULL if not found in which case @res provides
+ * the error code.
+ */
+void *dt_driver_device_from_node(int nodeoffset, enum dt_driver_type type,
+				 TEE_Result *res);
 
 /*
  * Return driver provider reference from its node offset value in the FDT
