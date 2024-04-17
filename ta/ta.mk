@@ -40,6 +40,7 @@ ta-mk-file-export-add-$(sm) += CFG_TEE_TA_LOG_LEVEL ?= $(CFG_TEE_TA_LOG_LEVEL)_n
 ta-mk-file-export-vars-$(sm) += CFG_TA_BGET_TEST
 ta-mk-file-export-vars-$(sm) += CFG_ATTESTATION_PTA
 ta-mk-file-export-vars-$(sm) += CFG_MEMTAG
+ta-mk-file-export-vars-$(sm) += CFG_WITH_TUI
 
 # Expand platform flags here as $(sm) will change if we have several TA
 # targets. Platform flags should not change after inclusion of ta/ta.mk.
@@ -104,6 +105,15 @@ libdir = lib/libdl
 libuuid = be807bbd-81e1-4dc4-bd99-3d363f240ece
 libl = utee utils
 include mk/lib.mk
+
+ifeq ($(CFG_WITH_TUI),y)
+libname = zlib
+libdir = lib/libzlib
+include mk/lib.mk
+libname = png
+libdir = lib/libpng
+include mk/lib.mk
+endif
 
 base-prefix :=
 
@@ -178,12 +188,18 @@ $(foreach f, $(ta-srcfiles), \
 	$(eval $(call copy-file, $(f), $(out-dir)/export-$(sm)/src)))
 
 # Copy keys
-ta-keys = keys/default_ta.pem
+ta-keys := $(TA_SIGN_KEY)
+# default_ta.pem is a symlink to default.pem, for backwards compatibility.
+# If default_ta.pem is used, copy both files.
+ifeq ($(TA_SIGN_KEY),keys/default_ta.pem)
+ta-keys += keys/default.pem
+endif
+
 $(foreach f, $(ta-keys), \
 	$(eval $(call copy-file, $(f), $(out-dir)/export-$(sm)/keys)))
 
 # Copy the scripts
-ta-scripts = scripts/sign_encrypt.py scripts/symbolize.py
+ta-scripts = scripts/sign_encrypt.py scripts/symbolize.py scripts/sign_rproc_fw.py
 $(foreach f, $(ta-scripts), \
 	$(eval $(call copy-file, $(f), $(out-dir)/export-$(sm)/scripts)))
 

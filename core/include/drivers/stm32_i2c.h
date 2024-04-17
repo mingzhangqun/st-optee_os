@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: (GPL-2.0 OR BSD-3-Clause) */
 /*
- * Copyright (c) 2017-2019, STMicroelectronics
+ * Copyright (c) 2017-2022, STMicroelectronics
  */
 
 #ifndef __STM32_I2C_H
@@ -9,6 +9,8 @@
 #include <drivers/clk.h>
 #include <drivers/stm32_gpio.h>
 #include <kernel/dt.h>
+#include <kernel/dt_driver.h>
+#include <kernel/mutex_pm_aware.h>
 #include <mm/core_memprot.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -47,7 +49,7 @@
  * @analog_filter: True if enabling analog filter
  * @digital_filter_coef: filter coef (below STM32_I2C_DIGITAL_FILTER_MAX)
  */
-struct stm32_i2c_init_s {
+struct stm32_i2c_platform_data {
 	unsigned int dt_status;
 	paddr_t pbase;
 	size_t reg_size;
@@ -67,8 +69,8 @@ struct stm32_i2c_init_s {
 };
 
 enum i2c_state_e {
-	I2C_STATE_RESET,		/* Not yet initialized */
-	I2C_STATE_READY,		/* Ready for use */
+	I2C_STATE_RESET,	/* Not yet initialized */
+	I2C_STATE_READY,	/* Ready for use */
 	I2C_STATE_BUSY,		/* Internal process ongoing */
 	I2C_STATE_BUSY_TX,	/* Data Transmission ongoing */
 	I2C_STATE_BUSY_RX,	/* Data Reception ongoing */
@@ -77,7 +79,7 @@ enum i2c_state_e {
 
 enum i2c_mode_e {
 	I2C_MODE_NONE,		/* No active communication */
-	I2C_MODE_MASTER,		/* Communication in Master Mode */
+	I2C_MODE_MASTER,	/* Communication in Master Mode */
 	I2C_MODE_SLAVE,		/* Communication in Slave Mode */
 	I2C_MODE_MEM,		/* Communication in Memory Mode */
 };
@@ -111,8 +113,9 @@ struct i2c_cfg {
  * @saved_timing: Saved timing value if already computed
  * @saved_frequency: Saved frequency value if already computed
  * @sec_cfg: I2C registers configuration storage
- * @pinctrl: PINCTRLs configuration for the I2C PINs
- * @pinctrl_count: Number of PINCTRLs elements
+ * @pinctrl_list: Reference to PINCTRLs
+ * @secure_i2c: True if I2C bus is secure, false otherwise
+ * @mu: Protection on concurrent access to the I2C bus considering PM context
  */
 struct i2c_handle_s {
 	struct io_pa_va base;
@@ -124,8 +127,9 @@ struct i2c_handle_s {
 	uint32_t saved_timing;
 	unsigned long saved_frequency;
 	struct i2c_cfg sec_cfg;
-	struct stm32_pinctrl *pinctrl;
-	size_t pinctrl_count;
+	struct stm32_pinctrl_list *pinctrl_list;
+	bool secure_i2c;
+	struct mutex_pm_aware mu;
 };
 
 /* STM32 specific defines */
@@ -136,29 +140,27 @@ struct i2c_handle_s {
 #define STM32_I2C_DIGITAL_FILTER_MAX		U(16)
 
 /*
- * Fill struct stm32_i2c_init_s from DT content for a given I2C node
+ * Fill struct stm32_i2c_platform_data from DT content for a given I2C node
  *
  * @fdt: Reference to DT
  * @node: Target I2C node in the DT
- * @init: Output stm32_i2c_init_s structure
- * @pinctrl: Reference to output pinctrl array
- * @pinctrl_count: Input @pinctrl array size, output expected size upon success
+ * @init: Output stm32_i2c_platform_data structure
+ * @pinctrl: Reference to output pinctrl list
  * Return a TEE_Result compliant value
  */
-TEE_Result stm32_i2c_get_setup_from_fdt(void *fdt, int node,
-					struct stm32_i2c_init_s *init,
-					struct stm32_pinctrl **pinctrl,
-					size_t *pinctrl_count);
+TEE_Result stm32_i2c_get_setup_from_fdt(const void *fdt, int node,
+					struct stm32_i2c_platform_data *init,
+					struct stm32_pinctrl_list **pinctrl);
 
 /*
  * Initialize I2C bus handle from input configuration directives
  *
  * @hi2c: Reference to I2C bus handle structure
- * @init_data: Input stm32_i2c_init_s structure
+ * @init_data: Input stm32_i2c_platform_data structure
  * Return 0 on success else a negative value
  */
 int stm32_i2c_init(struct i2c_handle_s *hi2c,
-		   struct stm32_i2c_init_s *init_data);
+		   struct stm32_i2c_platform_data *init_data);
 
 /*
  * Send a memory write request in the I2C bus
@@ -258,11 +260,55 @@ void stm32_i2c_suspend(struct i2c_handle_s *hi2c);
 void stm32_i2c_resume(struct i2c_handle_s *hi2c);
 
 /*
- * Return true if I2C bus is enabled for secure world only, false otherwise
+ * i2c_get_handle_by_node - Fills the child i2c handle structure
+ * with an i2c handle structure given by the i2c provider,
+ * linked to the parameter node
+ * @subnode the node of the caller (i2c child node)
+ * @i2c_handle the pointer to the struct to fill
+ *
+ * Returns TEE_SUCCESS in case of success
+ *	   TEE_ERROR_DEFER_DRIVER_INIT if reset controller is not initialized
+ *	   Any TEE_Result compliant code in case of error.
  */
-static inline bool i2c_is_secure(struct i2c_handle_s *hi2c)
+
+TEE_Result i2c_dt_get_by_subnode(const void *fdt, int subnode,
+				 struct i2c_handle_s **i2c_handle);
+
+/*
+ * i2c_dt_get_func - Typedef of function to get i2c from
+ * devicetree properties
+ *
+ * @a: Pointer to devicetree description of the i2c to parse
+ * @data: Pointer to data given at i2c_dt_register_provider() call
+ * @res: Output result code of the operation:
+ *	TEE_SUCCESS in case of success
+ *	TEE_ERROR_DEFER_DRIVER_INIT if reset controller is not initialized
+ *	Any TEE_Result compliant code in case of error.
+ *
+ * Returns a struct i2c pointer pointing to an i2c matching
+ * the devicetree description or NULL if invalid description in which case
+ * @res provides the error code.
+ */
+typedef struct i2c_handle_s *(*i2c_dt_get_func)(struct dt_pargs *a, void *data,
+						TEE_Result *res);
+
+/*
+ * i2c_dt_register_provider - Register an i2c provider
+ *
+ * @fdt: Device tree to work on
+ * @nodeoffset: Node offset of the reset controller
+ * @get_dt_i2c: Callback to match the reset controller with a struct i2c
+ * @data: Data which will be passed to the get_dt_i2c callback
+ * Returns TEE_Result value
+ */
+static inline
+TEE_Result i2c_register_provider(const void *fdt, int nodeoffset,
+				 i2c_dt_get_func get_dt_i2c,
+				 void *data)
 {
-	return hi2c->dt_status == DT_STATUS_OK_SEC;
+	return dt_driver_register_provider(fdt, nodeoffset,
+					   (get_of_device_func)get_dt_i2c,
+					   data, DT_DRIVER_I2C);
 }
 
 #endif /* __STM32_I2C_H */

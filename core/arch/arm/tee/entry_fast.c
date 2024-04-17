@@ -5,6 +5,7 @@
  */
 
 #include <config.h>
+#include <drivers/wdt.h>
 #include <kernel/boot.h>
 #include <kernel/misc.h>
 #include <kernel/notif.h>
@@ -211,6 +212,29 @@ static void get_async_notif_value(struct thread_smc_args *args)
 		args->a2 |= OPTEE_SMC_ASYNC_NOTIF_PENDING;
 }
 
+static void get_it_value(struct thread_smc_args *args)
+{
+	bool value_valid = false;
+	bool value_pending = false;
+
+	args->a0 = OPTEE_SMC_RETURN_OK;
+	args->a1 = it_get_value(&value_valid, &value_pending);
+	args->a2 = 0;
+	if (value_valid)
+		args->a2 |= OPTEE_SMC_IT_NOTIF_VALID;
+	if (value_pending)
+		args->a2 |= OPTEE_SMC_IT_NOTIF_PENDING;
+}
+
+static void set_it_mask(struct thread_smc_args *args)
+{
+	uint32_t it_value = args->a1;
+	bool masked = args->a2;
+
+	args->a0 = OPTEE_SMC_RETURN_OK;
+	it_set_mask(it_value, masked);
+}
+
 /*
  * If tee_entry_fast() is overridden, it's still supposed to call this
  * function.
@@ -285,6 +309,26 @@ void __tee_entry_fast(struct thread_smc_args *args)
 			args->a0 = OPTEE_SMC_RETURN_UNKNOWN_FUNCTION;
 		break;
 
+	case OPTEE_SMC_GET_IT_NOTIF_VALUE:
+		if (IS_ENABLED(CFG_CORE_ASYNC_NOTIF))
+			get_it_value(args);
+		else
+			args->a0 = OPTEE_SMC_RETURN_UNKNOWN_FUNCTION;
+		break;
+
+	case OPTEE_SMC_SET_IT_NOTIF_MASK:
+		if (IS_ENABLED(CFG_CORE_ASYNC_NOTIF))
+			set_it_mask(args);
+		else
+			args->a0 = OPTEE_SMC_RETURN_UNKNOWN_FUNCTION;
+		break;
+#if defined(CFG_WDT_SM_HANDLER)
+	case OPTEE_SMC_WATCHDOG:
+	/* Consider mainline WDT SMC funcID for compatibility purpose */
+	case 0xbc000000:
+			__wdt_sm_handler(args);
+		break;
+#endif
 	default:
 		args->a0 = OPTEE_SMC_RETURN_UNKNOWN_FUNCTION;
 		break;

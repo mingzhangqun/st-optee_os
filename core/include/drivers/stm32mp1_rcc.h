@@ -6,8 +6,6 @@
 #ifndef __DRIVERS_STM32MP1_RCC_H__
 #define __DRIVERS_STM32MP1_RCC_H__
 
-#include <io.h>
-#include <stdbool.h>
 #include <util.h>
 
 #define RCC_TZCR			0x00
@@ -455,6 +453,9 @@
 #define RCC_MP_SREQCLRR_STPREQ_P0	BIT(0)
 #define RCC_MP_SREQCLRR_STPREQ_P1	BIT(1)
 
+/* Values of RCC_PWRLPDLYCR register */
+#define RCC_PWRLPDLYCR_PWRLP_DLY_MASK	GENMASK_32(21, 0)
+
 /* Global Control Register */
 #define RCC_MP_GCR_BOOT_MCU		BIT(0)
 
@@ -511,6 +512,9 @@
 #define RCC_AHB5RSTSETR_RNG1RST			BIT(6)
 #define RCC_AHB5RSTSETR_AXIMCRST		BIT(16)
 
+/* RCC_MP_AHB6RST(SET|CLR)R bit fields */
+#define RCC_AHB6RSTSETR_GPURST			BIT(5)
+
 /* RCC_MP_AHB5EN(SET|CLR)R bit fields */
 #define RCC_MP_AHB5ENSETR_GPIOZEN_POS		0
 #define RCC_MP_AHB5ENSETR_CRYP1EN_POS		4
@@ -545,6 +549,8 @@
 #define DT_RCC_SECURE_CLK_COMPAT	"st,stm32mp1-rcc-secure"
 
 #ifndef __ASSEMBLER__
+#include <io.h>
+#include <stdbool.h>
 #include <stm32_util.h>
 
 static inline bool stm32_rcc_is_secure(void)
@@ -557,5 +563,12 @@ static inline bool stm32_rcc_is_mckprot(void)
 	return io_read32(stm32_rcc_base() + RCC_TZCR) & RCC_TZCR_MCKPROT;
 }
 #endif /*__ASSEMBLER__*/
+
+
+/* Global Reset Register */
+#define RCC_MP_GRSTCSETR_MPSYSRST	BIT(0)
+#define RCC_MP_GRSTCSETR_MCURST		BIT(1)
+#define RCC_MP_GRSTCSETR_MPUP0RST	BIT(4)
+#define RCC_MP_GRSTCSETR_MPUP1RST	BIT(5)
 
 #endif /*__DRIVERS_STM32MP1_RCC_H__*/

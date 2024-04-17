@@ -67,6 +67,10 @@ enum dt_driver_type {
 	DT_DRIVER_UART,
 	DT_DRIVER_CLK,
 	DT_DRIVER_RSTCTRL,
+	DT_DRIVER_PINCTRL,
+	DT_DRIVER_I2C,
+	DT_DRIVER_ADC,
+	DT_DRIVER_NVMEM,
 };
 
 /*
@@ -165,6 +169,11 @@ int dt_enable_secure_status(void *fdt, int node);
  */
 
 /*
+ * Return the base address from a cell or (paddr_t)-1 in case of error
+ */
+paddr_t _fdt_read_paddr(const uint32_t *cell, int n);
+
+/*
  * Return the base address for the "reg" property of the specified node or
  * (paddr_t)-1 in case of error
  */
@@ -202,6 +211,14 @@ int _fdt_read_uint32_array(const void *fdt, int node, const char *prop_name,
 			   uint32_t *array, size_t count);
 
 /*
+ * Read one cell from a given multi-value property of the given node.
+ * Returns 0 on success, or a negative
+ * FDT error value otherwise.
+ */
+int _fdt_read_uint32_index(const void *fdt, int node, const char *prop_name,
+			   int index, uint32_t *value);
+
+/*
  * Read one cell from a given property of the given node.
  * Returns 0 on success, or a negative FDT error value otherwise.
  */
@@ -216,13 +233,21 @@ uint32_t _fdt_read_uint32_default(const void *fdt, int node,
 				  const char *prop_name, uint32_t dflt_value);
 
 /*
- * Check whether the node at @node has a reference name.
+ * This function fills reg node info (base & size) with an index.
  *
- * @node is the offset of the node that describes the device in @fdt.
- *
- * Returns true on success or false if no property
+ * Returns 0 on success and a negative FDT error code on failure.
  */
-bool _fdt_check_node(const void *fdt, int node);
+int _fdt_get_reg_props_by_index(const void *fdt, int node, int index,
+				paddr_t *base, size_t *size);
+
+/*
+ * This function fills reg node info (base & size) with an index found by
+ * checking the reg-names node.
+ *
+ * Returns 0 on success and a negative FDT error code on failure.
+ */
+int _fdt_get_reg_props_by_name(const void *fdt, int node, const char *name,
+			       paddr_t *base, size_t *size);
 
 #else /* !CFG_DT */
 
@@ -235,6 +260,12 @@ static inline const struct dt_driver *dt_find_compatible_driver(
 
 static inline int dt_map_dev(const void *fdt __unused, int offs __unused,
 			     vaddr_t *vbase __unused, size_t *size __unused)
+{
+	return -1;
+}
+
+static inline paddr_t _fdt_read_paddr(const uint32_t *cell __unused,
+				      int n __unused)
 {
 	return -1;
 }
@@ -289,7 +320,34 @@ static inline uint32_t _fdt_read_uint32_default(const void *fdt __unused,
 	return dflt_value;
 }
 
+static inline int _fdt_read_uint32_index(const void *fdt, int node,
+					 const char *prop_name,
+					 int index, uint32_t *value) {
+	return -1;
+}
+
+static inline int _fdt_get_reg_props_by_index(const void *fdt __unused,
+					      int node __unused,
+					      int index __unused,
+					      paddr_t *base __unused,
+					      size_t *size __unused)
+{
+	return -1;
+}
+
+static inline int _fdt_get_reg_props_by_name(const void *fdt __unused,
+					     int node __unused,
+					     const char *name __unused,
+					     paddr_t *base __unused,
+					     size_t *size __unused)
+{
+	return -1;
+}
+
 #endif /* !CFG_DT */
+
+TEE_Result add_probe_node_by_compat(const void *fdt, int node,
+				    const char *compat);
 
 #define for_each_dt_driver(drv) \
 	for (drv = SCATTERED_ARRAY_BEGIN(dt_drivers, struct dt_driver); \

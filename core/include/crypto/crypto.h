@@ -22,6 +22,7 @@
 #ifndef __CRYPTO_CRYPTO_H
 #define __CRYPTO_CRYPTO_H
 
+#include <stdbool.h>
 #include <tee/tee_obj.h>
 #include <tee_api_types.h>
 
@@ -98,7 +99,7 @@ size_t crypto_bignum_num_bytes(struct bignum *a);
 size_t crypto_bignum_num_bits(struct bignum *a);
 void crypto_bignum_bn2bin(const struct bignum *from, uint8_t *to);
 void crypto_bignum_copy(struct bignum *to, const struct bignum *from);
-void crypto_bignum_free(struct bignum *a);
+void crypto_bignum_free(struct bignum **a);
 void crypto_bignum_clear(struct bignum *a);
 
 /* return -1 if a<b, 0 if a==b, +1 if a>b */
@@ -350,6 +351,7 @@ enum crypto_rng_src {
 	CRYPTO_RNG_SRC_NONSECURE	= (1 << 1 | 0),
 };
 
+#if defined(CFG_WITH_SOFTWARE_PRNG) || defined(CFG_WITH_TRNG)
 /*
  * crypto_rng_init() - initialize the RNG
  * @data:	buffer with initial seed
@@ -382,6 +384,51 @@ void crypto_rng_add_event(enum crypto_rng_src sid, unsigned int *pnum,
  * function call.
  */
 TEE_Result crypto_rng_read(void *buf, size_t len);
+#else
+static inline TEE_Result crypto_rng_init(const void *data __unused,
+					 size_t dlen __unused)
+{
+	return TEE_SUCCESS;
+}
+
+static inline void crypto_rng_add_event(enum crypto_rng_src sid __unused,
+					unsigned int *pnum __unused,
+					const void *data __unused,
+					size_t dlen __unused)
+{
+}
+
+static inline TEE_Result crypto_rng_read(void *buf __unused,
+					 size_t len __unused)
+{
+	return TEE_ERROR_NOT_SUPPORTED;
+}
+#endif
+
+#ifdef CFG_WITH_TRNG
+/* crypto_rng_register_hw() - register a true hardware random generator */
+void crypto_rng_register_hw(void);
+
+/* crypto_rng_unregister_hw() - unregister true hardware random generator */
+void crypto_rng_unregister_hw(void);
+
+/* crypto_rng_hw_is_registered() - return whether a TRNG is registered */
+bool crypto_rng_hw_is_registered(void);
+#else
+static inline void crypto_rng_register_hw(void)
+{
+}
+
+/* crypto_rng_unregister_hw() - unregister true hardware random generator */
+static inline void crypto_rng_unregister_hw(void)
+{
+}
+
+static inline bool crypto_rng_hw_is_registered(void)
+{
+	return false;
+}
+#endif
 
 /*
  * crypto_aes_expand_enc_key() - Expand an AES key
