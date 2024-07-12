@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: (GPL-2.0 OR BSD-3-Clause)
 /*
- * Copyright (c) 2017-2019, STMicroelectronics
+ * Copyright (c) 2017-2024, STMicroelectronics
  *
  * The driver API is defined in header file stm32_i2c.h.
  *
@@ -16,10 +16,11 @@
 #include <drivers/stm32_gpio.h>
 #include <drivers/stm32_i2c.h>
 #include <io.h>
+#include <kernel/boot.h>
 #include <kernel/delay.h>
 #include <kernel/dt.h>
 #include <kernel/dt_driver.h>
-#include <kernel/boot.h>
+#include <kernel/mutex_pm_aware.h>
 #include <kernel/panic.h>
 #include <libfdt.h>
 #include <stdbool.h>
@@ -295,6 +296,9 @@ struct i2c_request {
 	uint32_t mem_addr_size;
 	unsigned int timeout_ms;
 };
+
+/* Non-null reference for compat data */
+static const int secure_i2c;
 
 static vaddr_t get_base(struct i2c_handle_s *hi2c)
 {
@@ -763,6 +767,8 @@ int stm32_i2c_init(struct i2c_handle_s *hi2c,
 	vaddr_t base = 0;
 	uint32_t val = 0;
 
+	mutex_pm_aware_init(&hi2c->mu);
+
 	rc = i2c_setup_timing(hi2c, init_data, &timing);
 	if (rc)
 		return rc;
@@ -827,9 +833,6 @@ int stm32_i2c_init(struct i2c_handle_s *hi2c,
 	rc = i2c_config_analog_filter(hi2c, init_data->analog_filter);
 	if (rc)
 		DMSG("I2C analog filter error %d", rc);
-
-	if (IS_ENABLED(CFG_STM32MP13))
-		stm32_pinctrl_set_secure_cfg(hi2c->pinctrl, true);
 
 	clk_disable(hi2c->clock);
 
@@ -1080,11 +1083,15 @@ static int do_write(struct i2c_handle_s *hi2c, struct i2c_request *request,
 	if (request->mode != I2C_MODE_MASTER && request->mode != I2C_MODE_MEM)
 		return -1;
 
-	if (hi2c->i2c_state != I2C_STATE_READY)
-		return -1;
-
 	if (!p_data || !size)
 		return -1;
+
+	mutex_pm_aware_lock(&hi2c->mu);
+
+	if (hi2c->i2c_state != I2C_STATE_READY) {
+		mutex_pm_aware_unlock(&hi2c->mu);
+		return -1;
+	}
 
 	clk_enable(hi2c->clock);
 
@@ -1174,6 +1181,7 @@ static int do_write(struct i2c_handle_s *hi2c, struct i2c_request *request,
 
 bail:
 	clk_disable(hi2c->clock);
+	mutex_pm_aware_unlock(&hi2c->mu);
 
 	return rc;
 }
@@ -1216,8 +1224,12 @@ int stm32_i2c_read_write_membyte(struct i2c_handle_s *hi2c, uint16_t dev_addr,
 	uint8_t *p_buff = p_data;
 	uint32_t event_mask = 0;
 
-	if (hi2c->i2c_state != I2C_STATE_READY || !p_data)
+	mutex_pm_aware_lock(&hi2c->mu);
+
+	if (hi2c->i2c_state != I2C_STATE_READY || !p_data) {
+		mutex_pm_aware_unlock(&hi2c->mu);
 		return -1;
+	}
 
 	clk_enable(hi2c->clock);
 
@@ -1277,6 +1289,7 @@ int stm32_i2c_read_write_membyte(struct i2c_handle_s *hi2c, uint16_t dev_addr,
 
 bail:
 	clk_disable(hi2c->clock);
+	mutex_pm_aware_unlock(&hi2c->mu);
 
 	return rc;
 }
@@ -1303,11 +1316,15 @@ static int do_read(struct i2c_handle_s *hi2c, struct i2c_request *request,
 	if (request->mode != I2C_MODE_MASTER && request->mode != I2C_MODE_MEM)
 		return -1;
 
-	if (hi2c->i2c_state != I2C_STATE_READY)
-		return -1;
-
 	if (!p_data || !size)
 		return -1;
+
+	mutex_pm_aware_lock(&hi2c->mu);
+
+	if (hi2c->i2c_state != I2C_STATE_READY) {
+		mutex_pm_aware_unlock(&hi2c->mu);
+		return -1;
+	}
 
 	clk_enable(hi2c->clock);
 
@@ -1392,6 +1409,7 @@ static int do_read(struct i2c_handle_s *hi2c, struct i2c_request *request,
 
 bail:
 	clk_disable(hi2c->clock);
+	mutex_pm_aware_unlock(&hi2c->mu);
 
 	return rc;
 }
@@ -1473,8 +1491,12 @@ bool stm32_i2c_is_device_ready(struct i2c_handle_s *hi2c, uint32_t dev_addr,
 	unsigned int i2c_trials = 0U;
 	bool rc = false;
 
-	if (hi2c->i2c_state != I2C_STATE_READY)
+	mutex_pm_aware_lock(&hi2c->mu);
+
+	if (hi2c->i2c_state != I2C_STATE_READY) {
+		mutex_pm_aware_unlock(&hi2c->mu);
 		return rc;
+	}
 
 	clk_enable(hi2c->clock);
 
@@ -1549,6 +1571,7 @@ bool stm32_i2c_is_device_ready(struct i2c_handle_s *hi2c, uint32_t dev_addr,
 
 bail:
 	clk_disable(hi2c->clock);
+	mutex_pm_aware_unlock(&hi2c->mu);
 
 	return rc;
 }
@@ -1571,9 +1594,6 @@ void stm32_i2c_resume(struct i2c_handle_s *hi2c)
 	}
 
 	restore_cfg(hi2c, &hi2c->sec_cfg);
-
-	if (IS_ENABLED(CFG_STM32MP13))
-		stm32_pinctrl_set_secure_cfg(hi2c->pinctrl, true);
 
 	hi2c->i2c_state = I2C_STATE_READY;
 }
@@ -1600,7 +1620,7 @@ static TEE_Result stm32_get_i2c_dev(struct dt_pargs *args, void *data,
 	struct stm32_i2c_dev *stm32_i2c_dev = NULL;
 	paddr_t addr = 0;
 
-	addr = fdt_reg_base_address(args->fdt, args->phandle_node);
+	addr = fdt_reg_base_address(args->fdt, args->consumer_node);
 	if (addr == DT_INFO_INVALID_REG) {
 		DMSG("Can't get device I2C address");
 		return TEE_ERROR_GENERIC;
@@ -1621,7 +1641,7 @@ static TEE_Result stm32_get_i2c_dev(struct dt_pargs *args, void *data,
 }
 
 static TEE_Result stm32_i2c_probe(const void *fdt, int node,
-				  const void *compat_data __unused)
+				  const void *compat_data)
 {
 	TEE_Result res = TEE_SUCCESS;
 	int subnode = 0;
@@ -1654,6 +1674,12 @@ static TEE_Result stm32_i2c_probe(const void *fdt, int node,
 	init_data.analog_filter = true;
 	init_data.digital_filter_coef = 0;
 
+	if (compat_data == &secure_i2c)
+		i2c_handle_p->i2c_secure = true;
+
+	if (pinctrl_apply_state(i2c_handle_p->pinctrl))
+		panic();
+
 	res = stm32_i2c_init(i2c_handle_p, &init_data);
 	if (res)
 		panic("Couldn't initialise I2C");
@@ -1675,9 +1701,10 @@ static TEE_Result stm32_i2c_probe(const void *fdt, int node,
 }
 
 static const struct dt_device_match stm32_i2c_match_table[] = {
-	{ .compatible = "st,stm32mp15-i2c" },
-	{ .compatible = "st,stm32mp13-i2c" },
+	{ .compatible = "st,stm32mp15-i2c", .compat_data = &secure_i2c },
+	{ .compatible = "st,stm32mp13-i2c", .compat_data = &secure_i2c },
 	{ .compatible = "st,stm32mp15-i2c-non-secure" },
+	{ .compatible = "st,stm32mp25-i2c", .compat_data = &secure_i2c },
 	{ }
 };
 

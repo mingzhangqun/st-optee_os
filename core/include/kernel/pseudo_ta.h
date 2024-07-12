@@ -2,8 +2,8 @@
 /*
  * Copyright (c) 2015, Linaro Limited
  */
-#ifndef KERNEL_PSEUDO_TA_H
-#define KERNEL_PSEUDO_TA_H
+#ifndef __KERNEL_PSEUDO_TA_H
+#define __KERNEL_PSEUDO_TA_H
 
 #include <assert.h>
 #include <compiler.h>
@@ -40,6 +40,7 @@ struct pseudo_ta_head {
 	TEE_Result (*invoke_command_entry_point)(void *pSessionContext,
 			uint32_t nCommandID, uint32_t nParamTypes,
 			TEE_Param pParams[TEE_NUM_PARAMS]);
+	bool (*ask_for_enumeration)(void);
 };
 
 #define pseudo_ta_register(...)	\
@@ -59,6 +60,13 @@ static inline struct pseudo_ta_ctx *to_pseudo_ta_ctx(struct ts_ctx *ctx)
 	return container_of(ctx, struct pseudo_ta_ctx, ctx.ts_ctx);
 }
 
+/*
+ * Setup session context for a pseudo TA
+ * @uuid: Pseudo TA UUID
+ * @s: Session for which to setup a pseudo TA context
+ *
+ * This function must be called with tee_ta_mutex locked.
+ */
 TEE_Result tee_ta_init_pseudo_ta_session(const TEE_UUID *uuid,
 			struct tee_ta_session *s);
 
@@ -76,6 +84,7 @@ static inline bool is_caller_ta_with_pan(void)
 	return s && is_user_ta_ctx(s->ctx);
 }
 
+#ifdef CFG_WITH_USER_TA
 /*
  * If caller is a TA and PAN is enabled, allocate bounce buffers for each
  * memref in @params and build @bparams, then make *@oparams point to @bparams.
@@ -94,6 +103,28 @@ TEE_Result from_bounce_params(uint32_t param_types,
 			      TEE_Param params[TEE_NUM_PARAMS],
 			      TEE_Param bparams[TEE_NUM_PARAMS],
 			      TEE_Param *eparams);
+#else
+static inline TEE_Result
+to_bounce_params(uint32_t param_types __unused,
+		 TEE_Param params[TEE_NUM_PARAMS] __unused,
+		 TEE_Param bparams[TEE_NUM_PARAMS] __unused,
+		 TEE_Param **oparams __unused)
+{
+	return TEE_ERROR_NOT_SUPPORTED;
+}
 
-#endif /* KERNEL_PSEUDO_TA_H */
+/*
+ * If @eparams == @bparams, copy data from @bparams to @params. Otherwise, do
+ * nothing.
+ */
+static inline TEE_Result
+from_bounce_params(uint32_t param_types __unused,
+		   TEE_Param params[TEE_NUM_PARAMS] __unused,
+		   TEE_Param bparams[TEE_NUM_PARAMS] __unused,
+		   TEE_Param *eparams __unused)
+{
+	return TEE_ERROR_NOT_SUPPORTED;
+}
+#endif
+#endif /* __KERNEL_PSEUDO_TA_H */
 

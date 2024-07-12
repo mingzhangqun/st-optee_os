@@ -6,7 +6,7 @@
 #include <assert.h>
 #include <drivers/clk.h>
 #include <drivers/clk_dt.h>
-#include <drivers/stm32_iwdg.h>
+#include <drivers/rstctrl.h>
 #include <drivers/wdt.h>
 #include <io.h>
 #include <keep.h>
@@ -19,16 +19,20 @@
 #include <kernel/panic.h>
 #include <kernel/pm.h>
 #include <kernel/spinlock.h>
+#include <kernel/tee_time.h>
 #include <libfdt.h>
 #include <mm/core_memprot.h>
 #include <sm/sm.h>
+#include <stdint.h>
 #include <stm32_util.h>
 #include <string.h>
 #include <trace.h>
 
 /* IWDG Compatibility */
-#define IWDG_TIMEOUT_US		U(1000)
+#define IWDG_TIMEOUT_US		U(10000)
 #define IWDG_CNT_MASK		GENMASK_32(11, 0)
+#define IWDG_ONF_MIN_VER	U(0x31)
+#define IWDG_ICR_MIN_VER	U(0x40)
 
 /* IWDG registers offsets */
 #define IWDG_KR_OFFSET		U(0x00)
@@ -36,7 +40,10 @@
 #define IWDG_RLR_OFFSET		U(0x08)
 #define IWDG_SR_OFFSET		U(0x0C)
 #define IWDG_EWCR_OFFSET	U(0x14)
+#define IWDG_ICR_OFFSET		U(0x18)
+#define IWDG_VERR_OFFSET	U(0x3F4)
 
+#define IWDG_KR_WPROT_KEY	U(0x0000)
 #define IWDG_KR_ACCESS_KEY	U(0x5555)
 #define IWDG_KR_RELOAD_KEY	U(0xAAAA)
 #define IWDG_KR_START_KEY	U(0xCCCC)
@@ -52,48 +59,77 @@
 #define IWDG_SR_EWU		BIT(3)
 #define IWDG_SR_UPDATE_MASK	(IWDG_SR_PVU | IWDG_SR_RVU | IWDG_SR_WVU | \
 				 IWDG_SR_EWU)
+#define IWDG_SR_ONF		BIT(8)
+#define IWDG_SR_EWIF		BIT(14)
+#define IWDG_SR_EWIF_V40	BIT(15)
 
 #define IWDG_EWCR_EWIE		BIT(15)
 #define IWDG_EWCR_EWIC		BIT(14)
 
+#define IWDG_ICR_EWIC		BIT(15)
+
+#define IWDG_VERR_REV_MASK	GENMASK_32(7, 0)
+
+/* Define default early timeout delay to 5 sec before timeout */
+#define IWDG_ETIMEOUT_SEC	U(5)
+
 /*
  * Values for struct stm32_iwdg_device::flags
- * IWDG_FLAGS_HW_ENABLED                Watchdog is enabled by BootROM
- * IWDG_FLAGS_DISABLE_ON_STOP           Watchdog is freezed in SoC STOP mode
- * IWDG_FLAGS_DISABLE_ON_STANDBY        Watchdog is freezed in SoC STANDBY mode
  * IWDG_FLAGS_NON_SECURE                Instance is assigned to non-secure world
  * IWDG_FLAGS_ENABLED			Watchdog has been enabled
  */
-#define IWDG_FLAGS_HW_ENABLED			BIT(0)
-#define IWDG_FLAGS_DISABLE_ON_STOP		BIT(1)
-#define IWDG_FLAGS_DISABLE_ON_STANDBY		BIT(2)
 #define IWDG_FLAGS_NON_SECURE			BIT(3)
 #define IWDG_FLAGS_ENABLED			BIT(4)
 
 /*
  * IWDG watch instance data
  * @base - IWDG interface IOMEM base address
- * @clock - Bus clock
+ * @clk_pclk - Bus clock
  * @clk_lsi - IWDG source clock
+ * @itr_chip - Interrupt chip device
+ * @itr_num - Interrupt number for the IWDG instance
+ * @itr_handler - Interrupt handler
+ * @reset - Reset controller device used to control the ability of the watchdog
+ *          to reset the system
  * @flags - Property flags for the IWDG instance
  * @timeout - Watchdog elaspure timeout
+ * @saved_nb_int - Saved number of interrupts before panic
+ * @nb_int - Remaining number of interrupts before panic
+ * @hw_version - Watchdog HW version
+ * @last_refresh - Time of last watchdog refresh
  * @wdt_chip - Wathcdog chip instance
  * @link - Link in registered watchdog instance list
+ * @max_hw_timeout - Maximum hardware timeout
  */
 struct stm32_iwdg_device {
 	struct io_pa_va base;
-	struct clk *clock;
+	struct clk *clk_pclk;
 	struct clk *clk_lsi;
+	struct itr_chip *itr_chip;
+	size_t itr_num;
+	struct itr_handler *itr_handler;
+	struct rstctrl *reset;
 	uint32_t flags;
 	unsigned long timeout;
+	unsigned long saved_nb_int;
+	unsigned long nb_int;
+	unsigned int hw_version;
+	TEE_Time last_refresh;
 	struct wdt_chip wdt_chip;
 	SLIST_ENTRY(stm32_iwdg_device) link;
+	unsigned long max_hw_timeout;
 };
-
-static unsigned int iwdg_lock = SPINLOCK_UNLOCK;
 
 static SLIST_HEAD(iwdg_dev_list_head, stm32_iwdg_device) iwdg_dev_list =
 	SLIST_HEAD_INITIALIZER(iwdg_dev_list_head);
+
+static uint32_t sr_ewif_mask(struct stm32_iwdg_device *iwdg)
+{
+	if (iwdg->hw_version >= IWDG_ICR_MIN_VER)
+		return IWDG_SR_EWIF_V40;
+	else
+		return IWDG_SR_EWIF;
+}
 
 static vaddr_t get_base(struct stm32_iwdg_device *iwdg)
 {
@@ -105,9 +141,22 @@ static bool is_assigned_to_nsec(struct stm32_iwdg_device *iwdg)
 	return iwdg->flags & IWDG_FLAGS_NON_SECURE;
 }
 
-static bool is_enable(struct stm32_iwdg_device *iwdg)
+static void iwdg_wdt_set_enabled(struct stm32_iwdg_device *iwdg)
+{
+	iwdg->flags |= IWDG_FLAGS_ENABLED;
+}
+
+static bool iwdg_wdt_is_enabled(struct stm32_iwdg_device *iwdg)
 {
 	return iwdg->flags & IWDG_FLAGS_ENABLED;
+}
+
+static void iwdg_refresh(struct stm32_iwdg_device *iwdg)
+{
+	if (tee_time_get_sys_time(&iwdg->last_refresh))
+		panic();
+
+	io_write32(get_base(iwdg) + IWDG_KR_OFFSET, IWDG_KR_RELOAD_KEY);
 }
 
 /* Return counter value to related to input timeout in seconds, or 0 on error */
@@ -134,52 +183,97 @@ static TEE_Result iwdg_wait_sync(struct stm32_iwdg_device *iwdg)
 		if (timeout_elapsed(timeout_ref))
 			break;
 
-	if (!(io_read32(iwdg_base + IWDG_SR_OFFSET) & IWDG_SR_UPDATE_MASK))
+	if (io_read32(iwdg_base + IWDG_SR_OFFSET) & IWDG_SR_UPDATE_MASK)
 		return TEE_ERROR_GENERIC;
 
 	return TEE_SUCCESS;
 }
+
+static void stm32_iwdg_it_ack(struct stm32_iwdg_device *iwdg)
+{
+	vaddr_t iwdg_base = get_base(iwdg);
+
+	if (iwdg->hw_version >= IWDG_ICR_MIN_VER)
+		io_setbits32(iwdg_base + IWDG_ICR_OFFSET, IWDG_ICR_EWIC);
+	else
+		io_setbits32(iwdg_base + IWDG_EWCR_OFFSET, IWDG_EWCR_EWIC);
+}
+
+static enum itr_return stm32_iwdg_it_handler(struct itr_handler *h)
+{
+	unsigned int __maybe_unused cpu = get_core_pos();
+	struct stm32_iwdg_device *iwdg = h->data;
+	vaddr_t iwdg_base = get_base(iwdg);
+
+	DMSG("CPU %u IT Watchdog %#"PRIxPA, cpu, iwdg->base.pa);
+
+	/* Check for spurious interrupt */
+	if (!(io_read32(iwdg_base + IWDG_SR_OFFSET) & sr_ewif_mask(iwdg)))
+		return ITRR_NONE;
+
+	/*
+	 * Writing IWDG_EWCR_EWIT triggers a watchdog refresh.
+	 * To prevent the watchdog refresh, write-protect all the registers;
+	 * this makes read-only all IWDG_EWCR fields except IWDG_EWCR_EWIC.
+	 */
+	io_write32(iwdg_base + IWDG_KR_OFFSET, IWDG_KR_WPROT_KEY);
+
+	/* Disable early interrupt */
+	stm32_iwdg_it_ack(iwdg);
+
+	if (iwdg->nb_int > 1) {
+		iwdg->nb_int--;
+		io_write32(get_base(iwdg) + IWDG_KR_OFFSET, IWDG_KR_RELOAD_KEY);
+	} else {
+		panic("Watchdog");
+	}
+
+	return ITRR_HANDLED;
+}
+DECLARE_KEEP_PAGER(stm32_iwdg_it_handler);
 
 static TEE_Result configure_timeout(struct stm32_iwdg_device *iwdg)
 {
 	TEE_Result res = TEE_ERROR_GENERIC;
 	vaddr_t iwdg_base = get_base(iwdg);
 	uint32_t rlr_value = 0;
+	uint32_t ewie_value = 0;
+	int early_timeout = iwdg->timeout - IWDG_ETIMEOUT_SEC;
 
-	assert(is_enable(iwdg));
+	assert(iwdg_wdt_is_enabled(iwdg));
 
 	rlr_value = iwdg_timeout_cnt(iwdg, iwdg->timeout);
 	if (!rlr_value)
 		return TEE_ERROR_GENERIC;
 
-	clk_enable(iwdg->clock);
+	if (iwdg->itr_handler && early_timeout >= 1) {
+		ewie_value = iwdg_timeout_cnt(iwdg, IWDG_ETIMEOUT_SEC);
+		interrupt_enable(iwdg->itr_chip, iwdg->itr_num);
+	}
 
 	io_write32(iwdg_base + IWDG_KR_OFFSET, IWDG_KR_ACCESS_KEY);
 	io_write32(iwdg_base + IWDG_PR_OFFSET, IWDG_PR_DIV_256);
 	io_write32(iwdg_base + IWDG_RLR_OFFSET, rlr_value);
-	io_write32(iwdg_base + IWDG_KR_OFFSET, IWDG_KR_RELOAD_KEY);
+	if (ewie_value &&
+	    !(io_read32(iwdg_base + IWDG_EWCR_OFFSET) & IWDG_EWCR_EWIE))
+		io_write32(iwdg_base + IWDG_EWCR_OFFSET,
+			   ewie_value | IWDG_EWCR_EWIE);
 
 	res = iwdg_wait_sync(iwdg);
 
-	clk_disable(iwdg->clock);
+	io_write32(iwdg_base + IWDG_KR_OFFSET, IWDG_KR_RELOAD_KEY);
 
 	return res;
 }
 
 static void iwdg_start(struct stm32_iwdg_device *iwdg)
 {
-	clk_enable(iwdg->clock);
+	if (tee_time_get_sys_time(&iwdg->last_refresh))
+		panic();
+
 	io_write32(get_base(iwdg) + IWDG_KR_OFFSET, IWDG_KR_START_KEY);
-	clk_disable(iwdg->clock);
 
-	iwdg->flags |= IWDG_FLAGS_ENABLED;
-}
-
-static void iwdg_refresh(struct stm32_iwdg_device *iwdg)
-{
-	clk_enable(iwdg->clock);
-	io_write32(get_base(iwdg) + IWDG_KR_OFFSET, IWDG_KR_RELOAD_KEY);
-	clk_disable(iwdg->clock);
+	iwdg_wdt_set_enabled(iwdg);
 }
 
 /* Operators for watchdog OP-TEE interface */
@@ -188,21 +282,85 @@ static struct stm32_iwdg_device *wdt_chip_to_iwdg(struct wdt_chip *chip)
 	return container_of(chip, struct stm32_iwdg_device, wdt_chip);
 }
 
+static TEE_Result iwdg_wdt_init(struct wdt_chip *chip,
+				unsigned long *min_timeout,
+				unsigned long *max_timeout)
+{
+	struct stm32_iwdg_device *iwdg = wdt_chip_to_iwdg(chip);
+	unsigned long rate = clk_get_rate(iwdg->clk_lsi);
+
+	if (!rate)
+		return TEE_ERROR_GENERIC;
+
+	/* Be safe and expect any counter to be above 2 */
+	*min_timeout = 3 * IWDG_PRESCALER_256 / rate;
+	*max_timeout = INT32_MAX;
+
+	return TEE_SUCCESS;
+}
+
 static void iwdg_wdt_start(struct wdt_chip *chip)
 {
 	struct stm32_iwdg_device *iwdg = wdt_chip_to_iwdg(chip);
 
 	iwdg_start(iwdg);
+	if (iwdg->reset && iwdg->itr_handler)
+		stm32_iwdg_it_ack(iwdg);
 
 	if (configure_timeout(iwdg))
 		panic();
+
+	if (iwdg->reset)
+		if (rstctrl_assert(iwdg->reset))
+			panic();
+}
+
+static void iwdg_wdt_stop(struct wdt_chip *chip)
+{
+	struct stm32_iwdg_device *iwdg = wdt_chip_to_iwdg(chip);
+
+	if (iwdg->reset) {
+		if (rstctrl_deassert(iwdg->reset))
+			panic();
+		if (iwdg->itr_handler)
+			interrupt_disable(iwdg->itr_chip, iwdg->itr_num);
+	}
 }
 
 static void iwdg_wdt_refresh(struct wdt_chip *chip)
 {
 	struct stm32_iwdg_device *iwdg = wdt_chip_to_iwdg(chip);
 
+	iwdg->nb_int = iwdg->saved_nb_int;
 	iwdg_refresh(iwdg);
+}
+
+static void stm32_iwdg_handle_big_timeout(struct stm32_iwdg_device *iwdg,
+					  unsigned long timeout_sec) {
+	unsigned long interval = 0;
+	unsigned long rate = 0;
+	unsigned long n = 0;
+	long w = 0;
+
+	rate = clk_get_rate(iwdg->clk_lsi);
+	iwdg->max_hw_timeout = (IWDG_CNT_MASK + 1) * IWDG_PRESCALER_256 / rate;
+	interval = iwdg->max_hw_timeout - IWDG_ETIMEOUT_SEC;
+
+	if (timeout_sec > IWDG_ETIMEOUT_SEC)
+		n = (timeout_sec - IWDG_ETIMEOUT_SEC) / interval;
+
+	if ((timeout_sec - IWDG_ETIMEOUT_SEC) % interval != 0) {
+		/* Approximate the 'big timeout' */
+		w = ((timeout_sec - IWDG_ETIMEOUT_SEC) / (n + 1)) +
+		    IWDG_ETIMEOUT_SEC;
+		iwdg->timeout = w;
+		n = n + 1;
+	} else {
+		iwdg->timeout = iwdg->max_hw_timeout;
+	}
+
+	iwdg->saved_nb_int = n;
+	iwdg->nb_int = n;
 }
 
 static TEE_Result iwdg_wdt_set_timeout(struct wdt_chip *chip,
@@ -210,12 +368,12 @@ static TEE_Result iwdg_wdt_set_timeout(struct wdt_chip *chip,
 {
 	struct stm32_iwdg_device *iwdg = wdt_chip_to_iwdg(chip);
 
+	stm32_iwdg_handle_big_timeout(iwdg, timeout);
+
 	if (!iwdg_timeout_cnt(iwdg, timeout))
 		return TEE_ERROR_BAD_PARAMETERS;
 
-	iwdg->timeout = timeout;
-
-	if (is_enable(iwdg)) {
+	if (iwdg_wdt_is_enabled(iwdg)) {
 		TEE_Result res = TEE_ERROR_GENERIC;
 
 		res = configure_timeout(iwdg);
@@ -226,24 +384,47 @@ static TEE_Result iwdg_wdt_set_timeout(struct wdt_chip *chip,
 	return TEE_SUCCESS;
 }
 
+static TEE_Result iwdg_wdt_get_timeleft(struct wdt_chip *chip, bool *is_enabled,
+					unsigned long *timeleft)
+{
+	struct stm32_iwdg_device *iwdg = wdt_chip_to_iwdg(chip);
+	TEE_Result res = TEE_ERROR_GENERIC;
+	TEE_Time time = { };
+	TEE_Time now = { };
+
+	*is_enabled = iwdg_wdt_is_enabled(iwdg);
+
+	if (!*is_enabled) {
+		*timeleft = 0;
+		return TEE_SUCCESS;
+	}
+
+	res = tee_time_get_sys_time(&now);
+	if (res)
+		panic();
+
+	time.seconds = (iwdg->timeout - IWDG_ETIMEOUT_SEC) * iwdg->saved_nb_int
+		       + IWDG_ETIMEOUT_SEC;
+	TEE_TIME_ADD(iwdg->last_refresh, time, time);
+	if (TEE_TIME_LE(time, now)) {
+		*timeleft = 0;
+	} else {
+		TEE_TIME_SUB(time, now, time);
+		*timeleft = time.seconds;
+	}
+
+	return TEE_SUCCESS;
+}
+
 static const struct wdt_ops stm32_iwdg_ops = {
+	.init = iwdg_wdt_init,
 	.start = iwdg_wdt_start,
+	.stop = iwdg_wdt_stop,
 	.ping = iwdg_wdt_refresh,
 	.set_timeout = iwdg_wdt_set_timeout,
+	.get_timeleft = iwdg_wdt_get_timeleft,
 };
 DECLARE_KEEP_PAGER(stm32_iwdg_ops);
-
-/* Refresh all registered watchdogs */
-void stm32_iwdg_refresh(void)
-{
-	struct stm32_iwdg_device *iwdg = NULL;
-	uint32_t exceptions = cpu_spin_lock_xsave(&iwdg_lock);
-
-	SLIST_FOREACH(iwdg, &iwdg_dev_list, link)
-		iwdg_refresh(iwdg);
-
-	cpu_spin_unlock_xrestore(&iwdg_lock, exceptions);
-}
 
 /* Driver initialization */
 static TEE_Result stm32_iwdg_parse_fdt(struct stm32_iwdg_device *iwdg,
@@ -259,12 +440,27 @@ static TEE_Result stm32_iwdg_parse_fdt(struct stm32_iwdg_device *iwdg,
 	    dt_info.reg_size == DT_INFO_INVALID_REG_SIZE)
 		panic();
 
-	res = clk_dt_get_by_name(fdt, node, "pclk", &iwdg->clock);
+	res = clk_dt_get_by_name(fdt, node, "pclk", &iwdg->clk_pclk);
 	if (res)
 		return res;
 
 	res = clk_dt_get_by_name(fdt, node, "lsi", &iwdg->clk_lsi);
 	if (res)
+		return res;
+
+	res = interrupt_dt_get(fdt, node, &iwdg->itr_chip, &iwdg->itr_num);
+	if (res && res != TEE_ERROR_ITEM_NOT_FOUND)
+		return res;
+	if (!res) {
+		res = interrupt_create_handler(iwdg->itr_chip, iwdg->itr_num,
+					       stm32_iwdg_it_handler, iwdg, 0,
+					       &iwdg->itr_handler);
+		if (res)
+			return res;
+	}
+
+	res = rstctrl_dt_get_by_index(fdt, node, 0, &iwdg->reset);
+	if (res != TEE_SUCCESS && res != TEE_ERROR_ITEM_NOT_FOUND)
 		return res;
 
 	if (dt_info.status == DT_STATUS_OK_NSEC)
@@ -289,59 +485,65 @@ static TEE_Result stm32_iwdg_parse_fdt(struct stm32_iwdg_device *iwdg,
 	if (!iwdg->timeout)
 		return TEE_ERROR_BAD_PARAMETERS;
 
+	stm32_iwdg_handle_big_timeout(iwdg, iwdg->timeout);
+
 	if (!iwdg_timeout_cnt(iwdg, iwdg->timeout)) {
 		EMSG("Timeout %lu not applicable", iwdg->timeout);
 		return TEE_ERROR_BAD_PARAMETERS;
 	}
 
-	/* DT can specify low power cases */
-	if (!fdt_getprop(fdt, node, "stm32,enable-on-stop", NULL))
-		iwdg->flags |= IWDG_FLAGS_DISABLE_ON_STOP;
-
-	if (!fdt_getprop(fdt, node, "stm32,enable-on-standby", NULL))
-		iwdg->flags |= IWDG_FLAGS_DISABLE_ON_STANDBY;
-
 	return TEE_SUCCESS;
 }
 
-/* Platform should override this function to provide IWDG fuses configuration */
-TEE_Result __weak stm32_get_iwdg_otp_config(paddr_t pbase __unused,
-					    struct stm32_iwdg_otp_data *otp_d)
+static void iwdg_wdt_get_version_and_status(struct stm32_iwdg_device *iwdg)
 {
-	otp_d->hw_enabled = false;
-	otp_d->disable_on_stop = false;
-	otp_d->disable_on_standby = false;
+	vaddr_t iwdg_base = get_base(iwdg);
+	uint32_t rlr_value = 0;
 
-	return TEE_SUCCESS;
+	iwdg->hw_version = io_read32(iwdg_base + IWDG_VERR_OFFSET) &
+			   IWDG_VERR_REV_MASK;
+
+	/* Test if watchdog is already running */
+	if (iwdg->hw_version >= IWDG_ONF_MIN_VER) {
+		if (io_read32(iwdg_base + IWDG_SR_OFFSET) & IWDG_SR_ONF)
+			iwdg_wdt_set_enabled(iwdg);
+	} else {
+		/*
+		 * Workaround for old versions without IWDG_SR_ONF bit:
+		 * - write in IWDG_RLR_OFFSET
+		 * - wait for sync
+		 * - if sync succeeds, then iwdg is running
+		 */
+		io_write32(iwdg_base + IWDG_KR_OFFSET, IWDG_KR_ACCESS_KEY);
+
+		rlr_value = io_read32(iwdg_base + IWDG_RLR_OFFSET);
+		io_write32(iwdg_base + IWDG_RLR_OFFSET, rlr_value);
+
+		if (!iwdg_wait_sync(iwdg))
+			iwdg_wdt_set_enabled(iwdg);
+
+		io_write32(iwdg_base + IWDG_KR_OFFSET, IWDG_KR_WPROT_KEY);
+	}
+
+	DMSG("Watchdog is %sabled", iwdg_wdt_is_enabled(iwdg) ? "en" : "dis");
 }
 
 static TEE_Result stm32_iwdg_setup(struct stm32_iwdg_device *iwdg,
 				   const void *fdt, int node)
 {
-	struct stm32_iwdg_otp_data otp_data = { };
 	TEE_Result res = TEE_SUCCESS;
 
 	res = stm32_iwdg_parse_fdt(iwdg, fdt, node);
 	if (res)
 		return res;
 
-	res = stm32_get_iwdg_otp_config(iwdg->base.pa, &otp_data);
-	if (res)
-		return res;
-
-	if (otp_data.hw_enabled)
-		iwdg->flags |= IWDG_FLAGS_HW_ENABLED;
-	if (otp_data.disable_on_stop)
-		iwdg->flags |= IWDG_FLAGS_DISABLE_ON_STOP;
-	if (otp_data.disable_on_standby)
-		iwdg->flags |= IWDG_FLAGS_DISABLE_ON_STANDBY;
-
-	/* Enable watchdog source clock once for all */
+	/* Enable watchdog source and bus clocks once for all */
 	clk_enable(iwdg->clk_lsi);
+	clk_enable(iwdg->clk_pclk);
 
-	if (otp_data.hw_enabled) {
-		iwdg->flags |= IWDG_FLAGS_ENABLED;
+	iwdg_wdt_get_version_and_status(iwdg);
 
+	if (iwdg_wdt_is_enabled(iwdg)) {
 		/* Configure timeout if watchdog is already enabled */
 		res = configure_timeout(iwdg);
 		if (res)
@@ -352,6 +554,26 @@ static TEE_Result stm32_iwdg_setup(struct stm32_iwdg_device *iwdg,
 
 	return TEE_SUCCESS;
 }
+
+static TEE_Result
+stm32_iwdg_pm(enum pm_op op, unsigned int pm_hint __unused,
+	      const struct pm_callback_handle *pm_handle __unused)
+{
+	struct stm32_iwdg_device *iwdg = NULL;
+
+	SLIST_FOREACH(iwdg, &iwdg_dev_list, link) {
+		if (op == PM_OP_RESUME) {
+			clk_enable(iwdg->clk_lsi);
+			clk_enable(iwdg->clk_pclk);
+		} else {
+			clk_disable(iwdg->clk_lsi);
+			clk_disable(iwdg->clk_pclk);
+		}
+	}
+
+	return TEE_SUCCESS;
+}
+DECLARE_KEEP_PAGER_PM(stm32_iwdg_pm);
 
 static TEE_Result stm32_iwdg_register(struct stm32_iwdg_device *iwdg)
 {
@@ -392,6 +614,8 @@ static TEE_Result stm32_iwdg_probe(const void *fdt, int node,
 	res = stm32_iwdg_register(iwdg);
 	if (res)
 		goto err;
+
+	register_pm_core_service_cb(stm32_iwdg_pm, NULL, "stm32-iwdg");
 
 	return TEE_SUCCESS;
 

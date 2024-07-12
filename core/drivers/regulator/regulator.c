@@ -11,7 +11,7 @@
 #include <keep.h>
 #include <kernel/boot.h>
 #include <kernel/delay.h>
-#include <kernel/mutex.h>
+#include <kernel/mutex_pm_aware.h>
 #include <kernel/panic.h>
 #include <kernel/pm.h>
 #include <kernel/tee_time.h>
@@ -26,32 +26,15 @@
 static SLIST_HEAD(, regulator) regulator_device_list =
 	SLIST_HEAD_INITIALIZER(regulator);
 
+/* Access protection mutex complying the power state transitions context */
 static void lock_regulator(struct regulator *regulator)
 {
-	/*
-	 * Regulator operation may occur at runtime and during specific
-	 * system power transition: power off, PM suspend and resume.
-	 * These operate upon fastcall entries, under PSCI services
-	 * execution, where non-secure world is not operational. In these
-	 * cases we cannot take a mutex and will expect the mutex is
-	 * unlocked.
-	 */
-	if (thread_get_id_may_fail() == THREAD_ID_INVALID) {
-		assert(!regulator->lock.state);
-		return;
-	}
-
-	mutex_lock(&regulator->lock);
+	mutex_pm_aware_lock(&regulator->mutex);
 }
 
 static void unlock_regulator(struct regulator *regulator)
 {
-	if (thread_get_id_may_fail() == THREAD_ID_INVALID) {
-		/* Path for PM sequences when with local Monitor */
-		return;
-	}
-
-	mutex_unlock(&regulator->lock);
+	mutex_pm_aware_unlock(&regulator->mutex);
 }
 
 static TEE_Result set_state(struct regulator *regulator, bool on_not_off)
@@ -90,6 +73,8 @@ static TEE_Result regulator_refcnt_enable(struct regulator *regulator)
 
 			return res;
 		}
+
+		udelay(regulator->enable_ramp_delay_us);
 	}
 
 	regulator->refcount++;
@@ -181,9 +166,27 @@ bool regulator_is_enabled(struct regulator *regulator)
 	return !res && enabled;
 }
 
+int regulator_get_voltage(struct regulator *regulator)
+{
+	TEE_Result res = TEE_SUCCESS;
+	int level_uv = regulator->min_uv;
+
+	if (regulator->ops->get_voltage) {
+		res = regulator->ops->get_voltage(regulator, &level_uv);
+		if (res) {
+			EMSG("%s get_voltage failed with %#"PRIx32,
+			     regulator_name(regulator), res);
+			level_uv = 0;
+		}
+	}
+
+	return level_uv;
+}
+
 TEE_Result regulator_set_voltage(struct regulator *regulator, int level_uv)
 {
 	TEE_Result res = TEE_ERROR_GENERIC;
+	int cur_uv = 0;
 
 	assert(regulator);
 	FMSG("%s %duV", regulator_name(regulator), level_uv);
@@ -191,7 +194,8 @@ TEE_Result regulator_set_voltage(struct regulator *regulator, int level_uv)
 	if (level_uv < regulator->min_uv || level_uv > regulator->max_uv)
 		return TEE_ERROR_BAD_PARAMETERS;
 
-	if (level_uv == regulator->cur_uv)
+	cur_uv = regulator_get_voltage(regulator);
+	if (level_uv == cur_uv)
 		return TEE_SUCCESS;
 
 	if (!regulator->ops->set_voltage)
@@ -207,29 +211,67 @@ TEE_Result regulator_set_voltage(struct regulator *regulator, int level_uv)
 		return res;
 	}
 
-	regulator->cur_uv = level_uv;
+	if (regulator->ramp_delay_uv_per_us) {
+		unsigned int d = 0;
+
+		if (cur_uv > level_uv)
+			d = cur_uv - level_uv;
+		else
+			d = level_uv - cur_uv;
+
+		d /= regulator->ramp_delay_uv_per_us;
+
+		FMSG("%s %"PRIu32"uS", regulator_name(regulator), d);
+		udelay(d);
+	}
 
 	return TEE_SUCCESS;
 }
 
 TEE_Result regulator_supported_voltages(struct regulator *regulator,
-					struct regulator_voltages **voltages)
+					struct regulator_voltages_desc **desc,
+					const int **levels)
 {
-	assert(regulator && voltages);
+	TEE_Result res = TEE_ERROR_NOT_SUPPORTED;
 
-	if (regulator->ops->supported_voltages) {
-		TEE_Result res = TEE_ERROR_GENERIC;
+	assert(regulator && desc && levels);
 
-		res = regulator->ops->supported_voltages(regulator, voltages);
-		if (res == TEE_SUCCESS)
-			return TEE_SUCCESS;
-		if (res != TEE_ERROR_NOT_SUPPORTED)
-			return res;
+	if (regulator->ops->supported_voltages)
+		res = regulator->ops->supported_voltages(regulator, desc,
+							 levels);
+	if (res == TEE_ERROR_NOT_SUPPORTED) {
+		*desc = &regulator->voltages_fallback.desc;
+		*levels = regulator->voltages_fallback.levels;
+	} else if (res) {
+		return res;
 	}
 
-	*voltages = &regulator->voltages_fallback.desc;
+	if ((*desc)->type == VOLTAGE_TYPE_FULL_LIST) {
+		assert((*desc)->num_levels);
+		assert((*levels)[0] >= regulator->min_uv);
+		assert((*levels)[(*desc)->num_levels - 1] <= regulator->max_uv);
+	} else if ((*desc)->type == VOLTAGE_TYPE_INCREMENT) {
+		assert((*levels)[0] >= regulator->min_uv);
+		assert((*levels)[1] <= regulator->max_uv);
+	} else {
+		assert(0);
+	}
 
 	return TEE_SUCCESS;
+}
+
+struct regulator *regulator_get_by_name(const char *name)
+{
+	struct regulator *regulator = NULL;
+
+	assert(name);
+
+	SLIST_FOREACH(regulator, &regulator_device_list, link)
+		if (!strcmp(regulator->name, name))
+			return regulator;
+
+	EMSG("%s not found", name);
+	return NULL;
 }
 
 TEE_Result regulator_register(struct regulator *regulator)
@@ -243,19 +285,13 @@ TEE_Result regulator_register(struct regulator *regulator)
 	    regulator->flags & ~REGULATOR_FLAGS_MASK)
 		return TEE_ERROR_BAD_PARAMETERS;
 
+	mutex_pm_aware_init(&regulator->mutex);
+
 	regulator_get_range(regulator, &min_uv, &max_uv);
 	if (min_uv > max_uv)
 		return TEE_ERROR_BAD_PARAMETERS;
 
-	/* Sanitize regulator effective level */
-	if (regulator->ops->get_voltage) {
-		res = regulator->ops->get_voltage(regulator, &uv);
-		if (res)
-			return res;
-	} else {
-		uv = min_uv;
-	}
-	regulator->cur_uv = uv;
+	uv = regulator_get_voltage(regulator);
 
 	if (uv < min_uv || uv > max_uv) {
 		res = regulator_set_voltage(regulator, min_uv);
@@ -288,26 +324,6 @@ TEE_Result regulator_register(struct regulator *regulator)
 }
 
 /*
- * Log regulators state
- */
-void regulator_print_state(const char *message __maybe_unused)
-{
-	struct regulator *regulator = NULL;
-
-	DMSG("Regulator state: %s", message);
-	DMSG("name     use\ten\tuV\tmin\tmax\tflags\tsupply");
-
-	SLIST_FOREACH(regulator, &regulator_device_list, link)
-		DMSG("%8s %u\t%d\t%d\t%d\t%d\t%#x\t%s\n",
-		     regulator->name, regulator->refcount,
-		     regulator_is_enabled(regulator),
-		     regulator_get_voltage(regulator),
-		     regulator->min_uv, regulator->max_uv, regulator->flags,
-		     regulator->supply ? regulator_name(regulator->supply) :
-		     "<none>");
-}
-
-/*
  * Clean-up regulators that are not used.
  */
 static TEE_Result regulator_core_cleanup(void)
@@ -323,9 +339,187 @@ static TEE_Result regulator_core_cleanup(void)
 		}
 	}
 
-	regulator_print_state(__func__);
+	if (TRACE_LEVEL >= TRACE_DEBUG)
+		regulator_print_tree();
 
 	return TEE_SUCCESS;
 }
 
 release_init_resource(regulator_core_cleanup);
+
+/* Return updated message buffer position of NULL on failure */
+static __printf(3, 4) char *add_msg(char *cur, char *end, const char *fmt, ...)
+{
+	va_list ap = { };
+	int max_len = end - cur;
+	int ret = 0;
+
+	va_start(ap, fmt);
+	ret = vsnprintf(cur, max_len, fmt, ap);
+	va_end(ap);
+
+	if (ret < 0 || ret >= max_len)
+		return NULL;
+
+	return cur + ret;
+}
+
+static struct regulator *find_next_regulator(struct regulator *parent,
+					     struct regulator *sibling)
+{
+	struct regulator *regulator = NULL;
+
+	if (sibling)
+		regulator = SLIST_NEXT(sibling, link);
+	else
+		regulator = SLIST_FIRST(&regulator_device_list);
+
+	while (regulator && regulator->supply != parent)
+		regulator = SLIST_NEXT(regulator, link);
+
+	return regulator;
+}
+
+/* Regulator is the last supplied one by its supply in the registered list */
+static bool regulator_is_supply_last_supplied(struct regulator *regulator)
+{
+	return !find_next_regulator(regulator->supply, regulator);
+}
+
+/* Supply last node may already be printed for indentation level @cur_indent */
+static bool indent_with_empty_string(struct regulator *node_regulator,
+				     int node_indent, int cur_indent)
+{
+	struct regulator *r = node_regulator;
+	int n = 0;
+
+	/* Find supply at indentation level @node_indent - @cur_indent - 1 */
+	for (n = 0; n < node_indent - cur_indent - 1; n++)
+		r = r->supply;
+
+	return regulator_is_supply_last_supplied(r);
+}
+
+static void __maybe_unused print_regulator(struct regulator *regulator,
+					   int indent)
+{
+	static const char * const level_unit[] = { "uV", "mV", "V" };
+	int max_unit = ARRAY_SIZE(level_unit);
+	int level_max = 0;
+	int level_min = 0;
+	int level_cur = 0;
+	char msg_buf[128] = { };
+	char *msg_end = msg_buf + sizeof(msg_buf);
+	char *msg = msg_buf;
+	int n_max = 0;
+	int n_min = 0;
+	int n_cur = 0;
+	int n = 0;
+
+	if (indent) {
+		/* Indent for root clock level */
+		msg = add_msg(msg, msg_end, "   ");
+		if (!msg)
+			goto out;
+
+		/* Indent for root supply to regulator supply levels */
+		for (n = 0; n < indent - 1; n++) {
+			if (indent_with_empty_string(regulator, indent, n))
+				msg = add_msg(msg, msg_end, "    ");
+			else
+				msg = add_msg(msg, msg_end, "|   ");
+			if (!msg)
+				goto out;
+		}
+
+		/* Regulator indentation */
+		if (regulator_is_supply_last_supplied(regulator))
+			msg = add_msg(msg, msg_end, "`-- ");
+		else
+			msg = add_msg(msg, msg_end, "|-- ");
+
+		if (!msg)
+			goto out;
+	} else {
+		/* Root supply indentation */
+		msg = add_msg(msg, msg_end, "o- ");
+	}
+
+	regulator_get_range(regulator, &level_min, &level_max);
+	level_cur = regulator_get_voltage(regulator);
+
+	for (n_cur = 1; !(level_cur % 1000) && n_cur < max_unit; n_cur++)
+		level_cur /= 1000;
+	for (n_max = 1; !(level_max % 1000) && n_max < max_unit; n_max++)
+		level_max /= 1000;
+	for (n_min = 1; !(level_min % 1000) && n_min < max_unit; n_min++)
+		level_min /= 1000;
+
+	msg = add_msg(msg, msg_end, "%s \t(%3s / refcnt %u / flags %#"PRIx32
+		      " / %d %s ", regulator_name(regulator),
+		      regulator_is_enabled(regulator) ? "on " : "off",
+		      regulator->refcount, regulator->flags,
+		      level_cur, level_unit[n_cur - 1]);
+	if (!msg)
+		goto out;
+
+	if (level_min == level_max)
+		msg = add_msg(msg, msg_end, "fixed)");
+	else if (level_max == INT_MAX)
+		msg = add_msg(msg, msg_end, "[%d %s .. MAX])",
+			      level_min, level_unit[n_min - 1]);
+	else
+		msg = add_msg(msg, msg_end, "[%d %s .. %d %s])",
+			      level_min, level_unit[n_min - 1],
+			      level_max, level_unit[n_max - 1]);
+
+out:
+	if (!msg)
+		snprintf(msg_end - 4, 4, "...");
+
+	IMSG("%s", msg_buf);
+}
+
+static void print_tree(void)
+{
+	struct regulator *regulator = NULL;
+	struct regulator *parent = NULL;
+	struct regulator *next = NULL;
+	int indent = -1;
+
+	while (true) {
+		next = find_next_regulator(parent, regulator);
+		if (next) {
+			print_regulator(next, indent + 1);
+			/* Enter the subtree of the next regulator */
+			parent = next;
+			indent++;
+			regulator = NULL;
+		} else {
+			/*
+			 * We've processed all children at this level.
+			 * If parent is NULL we're at the top and are done.
+			 */
+			if (!parent)
+				break;
+			/*
+			 * Move up one level to resume with the next
+			 * regulator of the parent.
+			 */
+			regulator = parent;
+			parent = regulator->supply;
+			indent--;
+		}
+	}
+}
+
+void regulator_print_tree(void)
+{
+	if (IS_ENABLED(CFG_DRIVERS_REGULATOR_PRINT_TREE)) {
+		IMSG("Regulator tree summary");
+		if (SLIST_EMPTY(&regulator_device_list))
+			IMSG("-- No registered regulator");
+		else
+			print_tree();
+	}
+}

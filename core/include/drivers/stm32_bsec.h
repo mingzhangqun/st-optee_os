@@ -3,12 +3,13 @@
  * Copyright (c) 2017-2022, STMicroelectronics
  */
 
-#ifndef __STM32_BSEC_H
-#define __STM32_BSEC_H
+#ifndef __DRIVERS_STM32_BSEC_H
+#define __DRIVERS_STM32_BSEC_H
 
 #include <compiler.h>
 #include <stdint.h>
 #include <tee_api.h>
+#include <types_ext.h>
 
 /* BSEC_DEBUG */
 #define BSEC_HDPEN			BIT(4)
@@ -29,6 +30,23 @@ enum stm32_bsec_sec_state {
 	BSEC_STATE_SEC_OPEN,
 	BSEC_STATE_INVALID
 };
+
+/*
+ * Structure and API function for BSEC driver to get some platform data.
+ *
+ * @base: BSEC interface registers physical base address
+ * @shadow: BSEC shadow base address
+ * @upper_start: Base ID for the BSEC upper words in the platform
+ * @max_id: Max value for BSEC word ID for the platform
+ */
+struct stm32_bsec_static_cfg {
+	paddr_t base;
+	paddr_t shadow;
+	unsigned int upper_start;
+	unsigned int max_id;
+};
+
+void plat_bsec_get_static_cfg(struct stm32_bsec_static_cfg *cfg);
 
 /*
  * Load OTP from SAFMEM and provide its value
@@ -167,6 +185,16 @@ bool stm32_bsec_can_access_otp(uint32_t otp_id);
 bool stm32_bsec_nsec_can_access_otp(uint32_t otp_id);
 
 /*
+ * Return true if host-self debug is enabled.
+ */
+bool stm32_bsec_self_hosted_debug_is_enabled(void);
+
+/*
+ * Program BSEC for dummy ADAC (open access to every AP).
+ */
+void stm32_bsec_mp21_dummy_adac(void);
+
+/*
  * Find and get OTP location from its name.
  * @name: sub-node name to look up.
  * @otp_id: pointer to output OTP number or NULL.
@@ -199,4 +227,4 @@ TEE_Result stm32_bsec_find_otp_by_phandle(const uint32_t phandle,
  */
 TEE_Result stm32_bsec_get_state(enum stm32_bsec_sec_state *sec_state);
 
-#endif /*__STM32_BSEC_H*/
+#endif /*__DRIVERS_STM32_BSEC_H*/

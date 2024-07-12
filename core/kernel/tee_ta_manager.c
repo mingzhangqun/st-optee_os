@@ -21,6 +21,7 @@
 #include <mm/core_mmu.h>
 #include <mm/mobj.h>
 #include <mm/vm.h>
+#include <pta_stats.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +30,7 @@
 #include <tee/tee_obj.h>
 #include <tee/tee_svc_cryp.h>
 #include <tee/tee_svc_storage.h>
+#include <tee/tui.h>
 #include <trace.h>
 #include <types_ext.h>
 #include <user_ta_header.h>
@@ -37,12 +39,6 @@
 
 #if defined(CFG_TA_STATS)
 #define MAX_DUMP_SESS_NUM	(16)
-struct tee_ta_dump_stats {
-	TEE_UUID uuid;
-	uint32_t panicked;	/* True if TA has panicked */
-	uint32_t sess_num;	/* Number of opened session */
-	struct malloc_stats heap;
-};
 
 struct tee_ta_dump_ctx {
 	TEE_UUID uuid;
@@ -314,6 +310,7 @@ static void destroy_session(struct tee_ta_session *s,
 	}
 #endif
 
+	tui_close_session(&s->ts_sess);
 	tee_ta_unlink_session(s, open_sessions);
 #if defined(CFG_TA_GPROF_SUPPORT)
 	free(s->ts_sess.sbuf);
@@ -535,8 +532,7 @@ static TEE_Result tee_ta_init_session_with_context(struct tee_ta_session *s,
 		if (!ctx)
 			return TEE_ERROR_ITEM_NOT_FOUND;
 
-		if (!is_user_ta_ctx(&ctx->ts_ctx) ||
-		    !to_user_ta_ctx(&ctx->ts_ctx)->uctx.is_initializing)
+		if (!ctx->is_initializing)
 			break;
 		/*
 		 * Context is still initializing, wait here until it's
@@ -548,22 +544,22 @@ static TEE_Result tee_ta_init_session_with_context(struct tee_ta_session *s,
 	}
 
 	/*
-	 * If TA isn't single instance it should be loaded as new
-	 * instance instead of doing anything with this instance.
-	 * So tell the caller that we didn't find the TA it the
-	 * caller will load a new instance.
+	 * If the trusted service is not a single instance service (e.g. is
+	 * a multi-instance TA) it should be loaded as a new instance instead
+	 * of doing anything with this instance. So tell the caller that we
+	 * didn't find the TA it the caller will load a new instance.
 	 */
 	if ((ctx->flags & TA_FLAG_SINGLE_INSTANCE) == 0)
 		return TEE_ERROR_ITEM_NOT_FOUND;
 
 	/*
-	 * The TA is single instance, if it isn't multi session we
+	 * The trusted service is single instance, if it isn't multi session we
 	 * can't create another session unless its reference is zero
 	 */
 	if (!(ctx->flags & TA_FLAG_MULTI_SESSION) && ctx->ref_count)
 		return TEE_ERROR_BUSY;
 
-	DMSG("Re-open TA %pUl", (void *)&ctx->ts_ctx.uuid);
+	DMSG("Re-open trusted service %pUl", (void *)&ctx->ts_ctx.uuid);
 
 	ctx->ref_count++;
 	s->ts_sess.ctx = &ctx->ts_ctx;
@@ -626,22 +622,33 @@ static TEE_Result tee_ta_init_session(TEE_ErrorOrigin *err,
 
 	/* Look for already loaded TA */
 	res = tee_ta_init_session_with_context(s, uuid);
-	mutex_unlock(&tee_ta_mutex);
-	if (res == TEE_SUCCESS || res != TEE_ERROR_ITEM_NOT_FOUND)
+	if (res == TEE_SUCCESS || res != TEE_ERROR_ITEM_NOT_FOUND) {
+		mutex_unlock(&tee_ta_mutex);
 		goto out;
+	}
 
 	/* Look for secure partition */
 	res = stmm_init_session(uuid, s);
-	if (res == TEE_SUCCESS || res != TEE_ERROR_ITEM_NOT_FOUND)
+	if (res == TEE_SUCCESS || res != TEE_ERROR_ITEM_NOT_FOUND) {
+		mutex_unlock(&tee_ta_mutex);
+		if (res == TEE_SUCCESS)
+			res = stmm_complete_session(s);
+
 		goto out;
+	}
 
 	/* Look for pseudo TA */
 	res = tee_ta_init_pseudo_ta_session(uuid, s);
-	if (res == TEE_SUCCESS || res != TEE_ERROR_ITEM_NOT_FOUND)
+	if (res == TEE_SUCCESS || res != TEE_ERROR_ITEM_NOT_FOUND) {
+		mutex_unlock(&tee_ta_mutex);
 		goto out;
+	}
 
 	/* Look for user TA */
 	res = tee_ta_init_user_ta_session(uuid, s);
+	mutex_unlock(&tee_ta_mutex);
+	if (res == TEE_SUCCESS)
+		res = tee_ta_complete_user_ta_session(s);
 
 out:
 	if (!res) {
@@ -740,7 +747,7 @@ TEE_Result tee_ta_open_session(TEE_ErrorOrigin *err,
 	if (!res)
 		*sess = s;
 	else
-		EMSG("Failed. Return error 0x%x", res);
+		EMSG("Failed for TA %pUl. Return error %#"PRIx32, uuid, res);
 
 	return res;
 }
@@ -811,11 +818,10 @@ static TEE_Result dump_ta_memstats(struct tee_ta_session *s,
 	if (!ts_ctx)
 		return TEE_ERROR_ITEM_NOT_FOUND;
 
-	if (is_user_ta_ctx(ts_ctx) &&
-	    to_user_ta_ctx(ts_ctx)->uctx.is_initializing)
-		return TEE_ERROR_BAD_STATE;
-
 	ctx = ts_to_ta_ctx(ts_ctx);
+
+	if (ctx->is_initializing)
+		return TEE_ERROR_BAD_STATE;
 
 	if (tee_ta_try_set_busy(ctx)) {
 		if (!ctx->panicked) {
@@ -879,7 +885,7 @@ static void init_dump_ctx(struct tee_ta_dump_ctx *dump_ctx)
 }
 
 static TEE_Result dump_ta_stats(struct tee_ta_dump_ctx *dump_ctx,
-				struct tee_ta_dump_stats *dump_stats,
+				struct pta_stats_ta *dump_stats,
 				size_t ta_count)
 {
 	TEE_Result res = TEE_SUCCESS;
@@ -892,7 +898,7 @@ static TEE_Result dump_ta_stats(struct tee_ta_dump_ctx *dump_ctx,
 	nsec_sessions_list_head(&open_sessions);
 
 	for (i = 0; i < ta_count; i++) {
-		struct tee_ta_dump_stats *stats = &dump_stats[i];
+		struct pta_stats_ta *stats = &dump_stats[i];
 
 		memcpy(&stats->uuid, &dump_ctx[i].uuid,
 		       sizeof(dump_ctx[i].uuid));
@@ -932,7 +938,7 @@ static TEE_Result dump_ta_stats(struct tee_ta_dump_ctx *dump_ctx,
 TEE_Result tee_ta_instance_stats(void *buf, size_t *buf_size)
 {
 	TEE_Result res = TEE_SUCCESS;
-	struct tee_ta_dump_stats *dump_stats = NULL;
+	struct pta_stats_ta *dump_stats = NULL;
 	struct tee_ta_dump_ctx *dump_ctx = NULL;
 	struct tee_ta_ctx *ctx = NULL;
 	size_t sz = 0;
@@ -948,7 +954,7 @@ TEE_Result tee_ta_instance_stats(void *buf, size_t *buf_size)
 		if (is_user_ta_ctx(&ctx->ts_ctx))
 			ta_count++;
 
-	sz = sizeof(struct tee_ta_dump_stats) * ta_count;
+	sz = sizeof(struct pta_stats_ta) * ta_count;
 	if (!sz) {
 		/* sz = 0 means there is no UTA, return no item found. */
 		res = TEE_ERROR_ITEM_NOT_FOUND;
@@ -964,7 +970,7 @@ TEE_Result tee_ta_instance_stats(void *buf, size_t *buf_size)
 		DMSG("Data alignment");
 		res = TEE_ERROR_BAD_PARAMETERS;
 	} else {
-		dump_stats = (struct tee_ta_dump_stats *)buf;
+		dump_stats = (struct pta_stats_ta *)buf;
 		dump_ctx = malloc(sizeof(struct tee_ta_dump_ctx) * ta_count);
 		if (!dump_ctx)
 			res = TEE_ERROR_OUT_OF_MEMORY;

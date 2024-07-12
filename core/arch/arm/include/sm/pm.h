@@ -26,15 +26,34 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifndef SM_PM_H
-#define SM_PM_H
+#ifndef __SM_PM_H
+#define __SM_PM_H
 #include <stdint.h>
 #include <types_ext.h>
 
+#ifdef CFG_PAGED_PSCI_SYSTEM_SUSPEND
+#define SUSPEND_REGS_EXTRA_COUNT	22
+#else
+#define SUSPEND_REGS_EXTRA_COUNT	0
+#endif
+
+#ifdef CFG_WITH_LPAE
+#define SUSPEND_REGS_COUNT		(18 + SUSPEND_REGS_EXTRA_COUNT)
+#else
+#define  SUSPEND_REGS_COUNT		(16 + SUSPEND_REGS_EXTRA_COUNT)
+#endif
+
+/*
+ * struct sm_pm_ctx - PM suspend/resume context
+ * @sp: Stack pointer to restore
+ * @resume_addr: Platform resume return address on exit from sm_pm_cpu_resume()
+ * @suspend_regs: CPU registers saved/restored in sm_pm_cpu_do_suspend()
+ * and sm_pm_cpu_do_resumed()
+ */
 struct sm_pm_ctx {
 	uint32_t sp;
 	paddr_t cpu_resume_addr;
-	uint32_t suspend_regs[16];
+	uint32_t suspend_regs[SUSPEND_REGS_COUNT];
 };
 
 /* suspend/resume core functions */

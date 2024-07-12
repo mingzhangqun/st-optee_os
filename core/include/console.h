@@ -3,8 +3,8 @@
  * Copyright (c) 2014, Linaro Limited
  */
 
-#ifndef CONSOLE_H
-#define CONSOLE_H
+#ifndef __CONSOLE_H
+#define __CONSOLE_H
 
 #include <compiler.h>
 #include <tee_api_types.h>
@@ -46,10 +46,21 @@ TEE_Result get_console_node_from_dt(void *fdt, int *offs_out,
  * the console to this device.
  */
 void configure_console_from_dt(void);
+
+#ifdef CFG_RAM_CONSOLE
+/* Allocate and initialize RAM console */
+void ram_console_init(void);
+#else
+static inline void ram_console_init(void)
+{
+}
+#endif /* CFG_RAM_CONSOLE */
+
 #else
 static inline void configure_console_from_dt(void)
-{}
+{
+}
 #endif /* !CFG_DT */
 
-#endif /* CONSOLE_H */
+#endif /* __CONSOLE_H */
 

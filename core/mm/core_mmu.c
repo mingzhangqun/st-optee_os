@@ -471,6 +471,7 @@ void core_mmu_set_discovered_nsec_ddr(struct core_mmu_phys_mem *start,
 			break;
 		case MEM_AREA_EXT_DT:
 		case MEM_AREA_MANIFEST_DT:
+		case MEM_AREA_RAM_NSEC:
 		case MEM_AREA_RES_VASPACE:
 		case MEM_AREA_SHM_VASPACE:
 		case MEM_AREA_TS_VASPACE:
@@ -487,6 +488,14 @@ void core_mmu_set_discovered_nsec_ddr(struct core_mmu_phys_mem *start,
 	if (!core_mmu_check_end_pa(m[num_elems - 1].addr,
 				   m[num_elems - 1].size))
 		panic();
+
+	if (CFG_TEE_CORE_LOG_LEVEL >= TRACE_DEBUG) {
+		while (num_elems--) {
+			DMSG("Non-secure memory range [%#"PRIxPA" %#"PRIxPA"]",
+			     m->addr, m->addr + m->size);
+			m++;
+		}
+	}
 }
 
 static bool get_discovered_nsec_ddr(const struct core_mmu_phys_mem **start,
@@ -596,7 +605,6 @@ static bool pbuf_is_sdp_mem(paddr_t pbuf __unused, size_t len __unused)
 
 /* Check special memories comply with registered memories */
 static void verify_special_mem_areas(struct tee_mmap_region *mem_map,
-				     size_t len,
 				     const struct core_mmu_phys_mem *start,
 				     const struct core_mmu_phys_mem *end,
 				     const char *area_name __maybe_unused)
@@ -604,7 +612,6 @@ static void verify_special_mem_areas(struct tee_mmap_region *mem_map,
 	const struct core_mmu_phys_mem *mem;
 	const struct core_mmu_phys_mem *mem2;
 	struct tee_mmap_region *mmap;
-	size_t n;
 
 	if (start == end) {
 		DMSG("No %s memory area defined", area_name);
@@ -632,7 +639,7 @@ static void verify_special_mem_areas(struct tee_mmap_region *mem_map,
 	 * This is called before reserved VA space is loaded in mem_map.
 	 */
 	for (mem = start; mem < end; mem++) {
-		for (mmap = mem_map, n = 0; n < len; mmap++, n++) {
+		for (mmap = mem_map; mmap->type != MEM_AREA_END; mmap++) {
 			if (core_is_buffer_intersect(mem->addr, mem->size,
 						     mmap->pa, mmap->size)) {
 				MSG_MEM_INSTERSECT(mem->addr, mem->size,
@@ -778,6 +785,8 @@ uint32_t core_mmu_type_to_attr(enum teecore_memtypes t)
 	case MEM_AREA_RAM_SEC:
 	case MEM_AREA_SEC_RAM_OVERALL:
 		return attr | TEE_MATTR_SECURE | TEE_MATTR_PRW | cached;
+	case MEM_AREA_ROM_SEC:
+		return attr | TEE_MATTR_SECURE | TEE_MATTR_PR | cached;
 	case MEM_AREA_RES_VASPACE:
 	case MEM_AREA_SHM_VASPACE:
 		return 0;
@@ -1075,8 +1084,7 @@ static size_t collect_mem_ranges(struct tee_mmap_region *memory_map,
 	}
 
 	if (IS_ENABLED(CFG_SECURE_DATA_PATH))
-		verify_special_mem_areas(memory_map, num_elems,
-					 phys_sdp_mem_begin,
+		verify_special_mem_areas(memory_map, phys_sdp_mem_begin,
 					 phys_sdp_mem_end, "SDP");
 
 	add_va_space(memory_map, num_elems, MEM_AREA_RES_VASPACE,
@@ -1436,6 +1444,7 @@ static void check_mem_map(struct tee_mmap_region *map)
 		case MEM_AREA_MANIFEST_DT:
 		case MEM_AREA_RAM_SEC:
 		case MEM_AREA_RAM_NSEC:
+		case MEM_AREA_ROM_SEC:
 		case MEM_AREA_RES_VASPACE:
 		case MEM_AREA_SHM_VASPACE:
 		case MEM_AREA_PAGER_VASPACE:
@@ -1787,10 +1796,11 @@ static bool can_map_at_level(paddr_t paddr, vaddr_t vaddr,
 
 #ifdef CFG_WITH_PAGER
 	/*
-	 * If pager is enabled, we need to map tee ram
+	 * If pager is enabled, we need to map TEE RAM and the whole pager
 	 * regions with small pages only
 	 */
-	if (map_is_tee_ram(mm) && block_size != SMALL_PAGE_SIZE)
+	if ((map_is_tee_ram(mm) || mm->type == MEM_AREA_PAGER_VASPACE) &&
+	    block_size != SMALL_PAGE_SIZE)
 		return false;
 #endif
 

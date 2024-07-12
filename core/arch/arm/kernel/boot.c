@@ -122,8 +122,12 @@ __weak void plat_get_random_stack_canaries(void *buf, size_t ncan, size_t size)
 	/*
 	 * With virtualization the RNG is not initialized in Nexus core.
 	 * Need to override with platform specific implementation.
+	 * Without software PRNG and a registered TRNG, fallback to a fixed
+	 * canary value.
 	 */
-	if (IS_ENABLED(CFG_NS_VIRTUALIZATION)) {
+	if (IS_ENABLED(CFG_NS_VIRTUALIZATION) ||
+	    (!IS_ENABLED(CFG_WITH_SOFTWARE_PRNG) &&
+	     !crypto_rng_hw_is_registered())) {
 		IMSG("WARNING: Using fixed value for stack canary");
 		memset(buf, 0xab, ncan * size);
 		goto out;
@@ -1039,7 +1043,18 @@ static void discover_nsec_memory(void)
 			return;
 		}
 
-		DMSG("No non-secure memory found in FDT");
+		DMSG("No non-secure memory found in external DT");
+	}
+
+	fdt = get_embedded_dt();
+	if (fdt) {
+		mem = get_nsec_memory(fdt, &nelems);
+		if (mem) {
+			core_mmu_set_discovered_nsec_ddr(mem, nelems);
+			return;
+		}
+
+		DMSG("No non-secure memory found in embedded DT");
 	}
 
 	mem_begin = phys_ddr_overall_begin;
@@ -1091,6 +1106,9 @@ void init_tee_runtime(void)
 	/* Pager initializes TA RAM early */
 	core_mmu_init_ta_ram();
 #endif
+	/* Init RAM console if any */
+	ram_console_init();
+
 	/*
 	 * With virtualization we call this function when creating the
 	 * OP-TEE partition instead.
@@ -1191,7 +1209,7 @@ void __weak boot_init_primary_late(unsigned long fdt,
 	configure_console_from_dt();
 
 	IMSG("OP-TEE version: %s", core_v_str);
-	if (IS_ENABLED(CFG_WARN_INSECURE)) {
+	if (IS_ENABLED(CFG_INSECURE)) {
 		IMSG("WARNING: This OP-TEE configuration might be insecure!");
 		IMSG("WARNING: Please check https://optee.readthedocs.io/en/latest/architecture/porting_guidelines.html");
 	}

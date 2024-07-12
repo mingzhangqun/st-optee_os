@@ -125,7 +125,7 @@ CFG_OPTEE_REVISION_MINOR ?= 0
 CFG_OPTEE_REVISION_EXTRA ?=
 
 # Trusted OS implementation version
-TEE_IMPL_VERSION ?= $(shell git describe --always --dirty=-dev 2>/dev/null || \
+TEE_IMPL_VERSION ?= $(shell git describe --always --tags --dirty=-dev 2>/dev/null || \
 		      echo Unknown_$(CFG_OPTEE_REVISION_MAJOR).$(CFG_OPTEE_REVISION_MINOR))$(CFG_OPTEE_REVISION_EXTRA)
 ifeq ($(CFG_OS_REV_REPORTS_GIT_SHA1),y)
 TEE_IMPL_GIT_SHA1 := 0x$(shell git rev-parse --short=8 HEAD 2>/dev/null || echo 0)
@@ -499,6 +499,13 @@ endif
 # editing of the supplied DTB.
 CFG_DTB_MAX_SIZE ?= 0x10000
 
+# CFG_DT_CACHED_NODE_INFO, when enabled, parses the embedded DT at boot
+# time and caches some information to speed up retrieve of DT node data,
+# more specifically those for which libfdt parses the full DTB to find
+# the target node information.
+CFG_DT_CACHED_NODE_INFO ?= $(CFG_EMBED_DTB)
+$(eval $(call cfg-depends-all,CFG_DT_CACHED_NODE_INFO,CFG_EMBED_DTB))
+
 # Maximum size of the init info data passed to Secure Partitions.
 CFG_SP_INIT_INFO_MAX_SIZE ?= 0x1000
 
@@ -749,8 +756,10 @@ CFG_CORE_TPM_EVENT_LOG ?= n
 #
 # CFG_SCMI_MSG_CLOCK embeds SCMI clock protocol support.
 # CFG_SCMI_MSG_RESET_DOMAIN embeds SCMI reset domain protocol support.
+# CFG_SCMI_MSG_REGULATOR_CONSUMER uses DT to list regulators exposed thru SCMI
 # CFG_SCMI_MSG_SMT embeds a SMT header in shared device memory buffers
 # CFG_SCMI_MSG_VOLTAGE_DOMAIN embeds SCMI voltage domain protocol support.
+# CFG_SCMI_MSG_PERF_DOMAIN embeds SCMI performance domain management protocol
 # CFG_SCMI_MSG_SMT_FASTCALL_ENTRY embeds fastcall SMC entry with SMT memory
 # CFG_SCMI_MSG_SMT_INTERRUPT_ENTRY embeds interrupt entry with SMT memory
 # CFG_SCMI_MSG_SMT_THREAD_ENTRY embeds threaded entry with SMT memory
@@ -765,7 +774,9 @@ CFG_SCMI_MSG_SMT_FASTCALL_ENTRY ?= n
 CFG_SCMI_MSG_SMT_INTERRUPT_ENTRY ?= n
 CFG_SCMI_MSG_SMT_THREAD_ENTRY ?= n
 CFG_SCMI_MSG_THREAD_ENTRY ?= n
+CFG_SCMI_MSG_REGULATOR_CONSUMER ?= n
 CFG_SCMI_MSG_VOLTAGE_DOMAIN ?= n
+CFG_SCMI_MSG_PERF_DOMAIN ?=n
 $(eval $(call cfg-depends-all,CFG_SCMI_MSG_SMT_FASTCALL_ENTRY,CFG_SCMI_MSG_SMT))
 $(eval $(call cfg-depends-all,CFG_SCMI_MSG_SMT_INTERRUPT_ENTRY,CFG_SCMI_MSG_SMT))
 $(eval $(call cfg-depends-one,CFG_SCMI_MSG_SMT_THREAD_ENTRY,CFG_SCMI_MSG_SMT CFG_SCMI_MSG_SHM_MSG))
@@ -789,9 +800,22 @@ $(call force,CFG_SCMI_PTA,y,Required by CFG_SCMI_SCPFW)
 ifeq (,$(CFG_SCMI_SCPFW_PRODUCT))
 $(error CFG_SCMI_SCPFW=y requires CFG_SCMI_SCPFW_PRODUCT configuration)
 endif
-ifeq (,$(wildcard $(CFG_SCP_FIRMWARE)/CMakeLists.txt))
-$(error CFG_SCMI_SCPFW=y requires CFG_SCP_FIRMWARE configuration)
+ifeq (,$(CFG_SCP_FIRMWARE))
+$(call force,_CFG_SCP_FIRMWARE_IN_TREE,y)
+endif #CFG_SCP_FIRMWARE empty
+
+ifeq ($(_CFG_SCP_FIRMWARE_IN_TREE),y)
+ifeq (,$(wildcard core/lib/scmi-server/SCP-firmware/CMakeLists.txt))
+$(info WARNING: CFG_SCMI_SCPFW=y without CFG_SCP_FIRMWARE value expects SCP-firmware source tree at core/lib/scmi-serve/SCP-firmware/)
+$(info WARNING: Maybe need to get SCP-firmware source tree and set its absolute path in CFG_SCP_FIRMWARE.)
+$(error CFG_SCMI_SCPFW=y but cannot find the location of SCP-firmware source tree)
 endif
+else #_CFG_SCP_FIRMWARE_IN_TREE
+ifeq (,$(wildcard $(CFG_SCP_FIRMWARE)/CMakeLists.txt))
+$(info WARNING: Invalid config SCP-firmware source tree absolute path CFG_SCP_FIRMWARE=$(CFG_SCP_FIRMWARE))
+$(error CFG_SCMI_SCPFW=y but CFG_SCP_FIRMWARE does not seems to provide the source tree location)
+endif
+endif #_CFG_SCP_FIRMWARE_IN_TREE
 endif #CFG_SCMI_SCPFW
 
 ifeq ($(CFG_SCMI_MSG_DRIVERS)-$(CFG_SCMI_SCPFW),y-y)
@@ -810,6 +834,9 @@ ifeq ($(CFG_SCMI_PTA),y)
 _CFG_SCMI_PTA_SMT_HEADER ?= n
 _CFG_SCMI_PTA_MSG_HEADER ?= n
 endif
+
+# Enable Trusted User Interface
+CFG_WITH_TUI ?= n
 
 ifneq ($(CFG_STMM_PATH),)
 $(call force,CFG_WITH_STMM_SP,y)
@@ -859,10 +886,13 @@ CFG_PREALLOC_RPC_CACHE ?= y
 # CFG_DRIVERS_CLK_DT embeds devicetree clock parsing support
 # CFG_DRIVERS_CLK_FIXED add support for "fixed-clock" compatible clocks
 # CFG_DRIVERS_CLK_EARLY_PROBE makes clocks probed at early_init initcall level.
+# CFG_DRIVERS_CLK_PRINT_TREE embeds a helper function to print the clock tree
+# state on OP-TEE core console with the debug trace level.
 CFG_DRIVERS_CLK ?= n
 CFG_DRIVERS_CLK_DT ?= $(call cfg-all-enabled,CFG_DRIVERS_CLK CFG_DT)
 CFG_DRIVERS_CLK_FIXED ?= $(CFG_DRIVERS_CLK_DT)
 CFG_DRIVERS_CLK_EARLY_PROBE ?= $(CFG_DRIVERS_CLK_DT)
+CFG_DRIVERS_CLK_PRINT_TREE ?= n
 
 $(eval $(call cfg-depends-all,CFG_DRIVERS_CLK_DT,CFG_DRIVERS_CLK CFG_DT))
 $(eval $(call cfg-depends-all,CFG_DRIVERS_CLK_FIXED,CFG_DRIVERS_CLK_DT))
@@ -878,6 +908,10 @@ CFG_DRIVERS_GPIO ?= n
 # When enabled, CFG_DRIVERS_I2C provides I2C controller and devices support.
 CFG_DRIVERS_I2C ?= n
 
+# When enabled, CFG_DRIVERS_NVMEM provides a framework to register nvmem
+# providers and allow consumer drivers to get NVMEM cells using the Device Tree.
+CFG_DRIVERS_NVMEM ?= n
+
 # When enabled, CFG_DRIVERS_PINCTRL embeds a pin muxing controller framework in
 # OP-TEE core to provide drivers a way to apply pin muxing configurations based
 # on device-tree.
@@ -889,21 +923,42 @@ CFG_DRIVERS_PINCTRL ?= n
 #
 # When enabled, CFG_REGULATOR_FIXED embeds a voltage regulator driver for
 # DT compatible "regulator-fixed" devices.
+#
+# When enabled, CFG_REGULATOR_GPIO embeds a voltage regulator driver for
+# DT compatible "regulator-gpio" devices.
+#
+# CFG_DRIVERS_REGULATOR_PRINT_TREE embeds a helper function to print the
+# regulator tree state on OP-TEE core console with the info trace level.
 CFG_DRIVERS_REGULATOR ?= n
+CFG_DRIVERS_REGULATOR_PRINT_TREE ?= n
 CFG_REGULATOR_FIXED ?= n
+CFG_REGULATOR_GPIO ?= n
 
 $(eval $(call cfg-enable-all-depends,CFG_REGULATOR_FIXED, \
 	 CFG_DRIVERS_REGULATOR CFG_DT))
+$(eval $(call cfg-enable-all-depends,CFG_REGULATOR_GPIO, \
+	 CFG_DRIVERS_REGULATOR CFG_DT CFG_DRIVERS_GPIO))
 
-# The purpose of this flag is to show a print when booting up the device that
-# indicates whether the board runs a standard developer configuration or not.
-# A developer configuration doesn't necessarily has to be secure. The intention
+# When enabled, CFG_INSECURE permits insecure configuration of OP-TEE core
+# and shows a print (info level) when booting up the device that
+# indicates that the board runs a standard developer configuration.
+#
+# A developer configuration doesn't necessarily have to be secure. The intention
 # is that the one making products based on OP-TEE should override this flag in
 # plat-xxx/conf.mk for the platform they're basing their products on after
 # they've finalized implementing stubbed functionality (see OP-TEE
 # documentation/Porting guidelines) as well as vendor specific security
 # configuration.
-CFG_WARN_INSECURE ?= y
+#
+# CFG_WARN_INSECURE served the same purpose as CFG_INSECURE but is deprecated.
+ifneq (undefined,$(flavor CFG_WARN_INSECURE))
+$(info WARNING: CFG_WARN_INSECURE is deprecated, use CFG_INSECURE instead)
+CFG_INSECURE ?= $(CFG_WARN_INSECURE)
+ifneq ($(CFG_INSECURE),$(CFG_WARN_INSECURE))
+$(error Inconsistent CFG_INSECURE=$(CFG_INSECURE) and CFG_WARN_INSECURE=$(CFG_WARN_INSECURE))
+endif
+endif # CFG_WARN_INSECURE defined
+CFG_INSECURE ?= y
 
 # Enables warnings for declarations mixed with statements
 CFG_WARN_DECL_AFTER_STATEMENT ?= y
@@ -1029,6 +1084,13 @@ ifeq (y-y,$(CFG_CORE_PREALLOC_EL0_TBLS)-$(CFG_WITH_PAGER))
 $(error "CFG_WITH_PAGER can't support CFG_CORE_PREALLOC_EL0_TBLS")
 endif
 
+
+# CFG_DRIVERS_REMOTEPROC, when enabled, embeds support for remote processor
+# management including generic DT bindings for the configuration.
+CFG_DRIVERS_REMOTEPROC ?= n
+# CFG_REMOTEPROC_PTA, when enabled, embeds remote processor management PTA
+# service.
+CFG_REMOTEPROC_PTA ?= n
 # User TA runtime context dump.
 # When this option is enabled, OP-TEE provides a debug method for
 # developer to dump user TA's runtime context, including TA's heap stats.
@@ -1063,3 +1125,17 @@ CFG_HMAC_64_1024_RANGE ?= n
 # By default use standard pbkdf2 implementation
 CFG_CRYPTO_HW_PBKDF2 ?= n
 $(eval $(call cfg-depends-all,CFG_CRYPTO_HW_PBKDF2,CFG_CRYPTO_PBKDF2))
+
+# CFG_HALT_CORES_ON_PANIC, when enabled, makes any call to panic() halt the
+# other cores. The feature currently relies on GIC device to trap the other
+# cores using an SGI interrupt specified by CFG_HALT_CORES_ON_PANIC_SGI.
+CFG_HALT_CORES_ON_PANIC ?= n
+CFG_HALT_CORES_ON_PANIC_SGI ?= 15
+$(eval $(call cfg-depends-all,CFG_HALT_CORES_ON_PANIC,CFG_GIC))
+
+# CFG_RAM_CONSOLE, when enabled, stores in TA RAM all trace messages emitted
+# as soon as TA RAM memory pool is initialized. When a console driver registers,
+# it prints logged messages and frees the RAM console memory.
+# CFG_RAM_CONSOLE_SIZE defines the byte size of the RAM console buffer.
+CFG_RAM_CONSOLE ?= n
+CFG_RAM_CONSOLE_SIZE ?= 65536

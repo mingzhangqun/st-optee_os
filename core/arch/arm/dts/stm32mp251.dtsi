@@ -1,0 +1,3413 @@
+// SPDX-License-Identifier: (GPL-2.0-or-later OR BSD-3-Clause)
+/*
+ * Copyright (C) STMicroelectronics 2023 - All Rights Reserved
+ * Author: Alexandre Torgue <alexandre.torgue@foss.st.com> for STMicroelectronics.
+ */
+
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/clock/stm32mp25-clks.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/power/st,stm32mp25-power.h>
+#include <dt-bindings/regulator/st,stm32mp25-regulator.h>
+#include <dt-bindings/reset/stm32mp25-resets.h>
+#include <dt-bindings/scmi/scmi-clock.h>
+#include <dt-bindings/soc/stm32mp25-rif.h>
+#include <dt-bindings/soc/stm32mp25-rifsc.h>
+#include <dt-bindings/soc/stm32mp25-risab.h>
+#include <dt-bindings/soc/stm32mp25-risaf.h>
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu0: cpu@0 {
+			compatible = "arm,cortex-a35";
+			device_type = "cpu";
+			reg = <0>;
+			enable-method = "psci";
+			operating-points-v2 = <&cpu0_opp_table>;
+			clocks = <&rcc CK_CPU1>;
+		};
+	};
+
+	cpu0_opp_table: cpu0-opp-table {
+		compatible = "operating-points-v2";
+
+		opp-1200000000 {
+			opp-hz = /bits/ 64 <1200000000>;
+			opp-microvolt = <800000>;
+			opp-supported-hw = <0x3>;
+			st,opp-default;
+		};
+
+		opp-1500000000 {
+			opp-hz = /bits/ 64 <1500000000>;
+			opp-microvolt = <910000>;
+			opp-supported-hw = <0x2>;
+		};
+	};
+
+	hse_monitor: hse-monitor {
+		compatible = "st,freq-monitor";
+		counter = <&lptimer1 1 5 1 1>;
+		clocks = <&rcc HSE_CK>, <&rcc HSI_CK>;
+		clock-names = "hse", "hsi";
+		status = "disabled";
+	};
+
+	psci {
+		compatible = "arm,psci-1.0";
+		method = "smc";
+	};
+
+	intc: interrupt-controller@4ac00000 {
+		compatible = "arm,cortex-a7-gic";
+		#interrupt-cells = <3>;
+		interrupt-controller;
+		reg = <0x0 0x4ac10000 0x0 0x1000>,
+		      <0x0 0x4ac20000 0x0 0x2000>,
+		      <0x0 0x4ac40000 0x0 0x2000>,
+		      <0x0 0x4ac60000 0x0 0x2000>;
+		#address-cells = <1>;
+	};
+
+	clocks {
+		clk_hse: clk-hse {
+			#clock-cells = <0>;
+			compatible = "fixed-clock";
+			clock-frequency = <24000000>;
+		};
+
+		clk_hsi: clk-hsi {
+			#clock-cells = <0>;
+			compatible = "fixed-clock";
+			clock-frequency = <64000000>;
+		};
+
+		clk_lse: clk-lse {
+			#clock-cells = <0>;
+			compatible = "fixed-clock";
+			clock-frequency = <32768>;
+		};
+
+		clk_lsi: clk-lsi {
+			#clock-cells = <0>;
+			compatible = "fixed-clock";
+			clock-frequency = <32000>;
+		};
+
+		clk_msi: clk-msi {
+			#clock-cells = <0>;
+			compatible = "fixed-clock";
+			clock-frequency = <4000000>;
+		};
+
+		clk_i2sin: clk-i2sin {
+			#clock-cells = <0>;
+			compatible = "fixed-clock";
+			clock-frequency = <0>;
+		};
+
+		clk_rcbsec: clk-rcbsec {
+			#clock-cells = <0>;
+			compatible = "fixed-clock";
+			clock-frequency = <64000000>;
+		};
+	};
+
+	mlahb: ahb@1 {
+		compatible = "st,mlahb", "simple-bus";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges = <0x0 0x0 0x0 0xFFFFFFFC>;
+		dma-ranges = <0x0 0x0 0x0 0xFFFFFFFC>;
+
+		m33_rproc: m33@0 {
+			compatible = "st,stm32mp2-m33";
+			#reset-cells = <1>;
+			reg = <0 0>;
+			resets = <&rcc C2_R>,
+				 <&rcc C2_HOLDBOOT_R>;
+			reset-names = "mcu_rst", "hold_boot";
+			status = "disabled";
+		};
+	};
+
+	scmi: scmi {
+		compatible = "optee,scmi-server";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		agent_a35_ns: agent@1 {
+			reg = <1>;
+			compatible = "linaro,scmi-optee";
+			scmi-channel-id = <0>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			scmi_pd: protocol@11 {
+				reg = <0x11>;
+
+				power-domains {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					#power-domain-cells = <1>;
+
+					pd_gpu: pd@0 {
+						reg = <PD_SCMI_GPU>;
+						clocks = <&rcc PLL3_CK>;
+						voltd-supply = <&vddgpu>;
+						domain-name = "gpu-pd";
+					};
+				};
+			};
+
+			scmi_clock: protocol@14 {
+				reg = <0x14>;
+
+				clocks {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					#clock-cells = <1>;
+
+					clock@0 {
+						reg = <CK_SCMI_ICN_HS_MCU>;
+						domain-name = "ck_icn_hs_mcu";
+						clocks = <&rcc CK_ICN_HS_MCU>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@1 {
+						reg = <CK_SCMI_ICN_SDMMC>;
+						domain-name = "ck_icn_sdmmc";
+						clocks = <&rcc CK_ICN_SDMMC>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@2 {
+						reg = <CK_SCMI_ICN_DDR>;
+						domain-name = "ck_icn_ddr";
+						clocks = <&rcc CK_ICN_DDR>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@3 {
+						reg = <CK_SCMI_ICN_DISPLAY>;
+						domain-name = "ck_icn_display";
+						clocks = <&rcc CK_ICN_DISPLAY>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@4 {
+						reg = <CK_SCMI_ICN_HSL>;
+						domain-name = "ck_icn_hsl";
+						clocks = <&rcc CK_ICN_HSL>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@5 {
+						reg = <CK_SCMI_ICN_NIC>;
+						domain-name = "ck_icn_nic";
+						clocks = <&rcc CK_ICN_NIC>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@6 {
+						reg = <CK_SCMI_ICN_VID>;
+						domain-name = "ck_icn_vid";
+						clocks = <&rcc CK_ICN_VID>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@7 {
+						reg = <CK_SCMI_FLEXGEN_07>;
+						domain-name = "ck_flexgen_07";
+						clocks = <&rcc CK_FLEXGEN_07>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@8 {
+						reg = <CK_SCMI_FLEXGEN_08>;
+						domain-name = "ck_flexgen_08";
+						clocks = <&rcc CK_FLEXGEN_08>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@9 {
+						reg = <CK_SCMI_FLEXGEN_09>;
+						domain-name = "ck_flexgen_09";
+						clocks = <&rcc CK_FLEXGEN_09>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@a {
+						reg = <CK_SCMI_FLEXGEN_10>;
+						domain-name = "ck_flexgen_10";
+						clocks = <&rcc CK_FLEXGEN_10>;
+						flags = <(SCMI_CLOCK_DEFAULT_ENABLED |
+							  SCMI_CLOCK_ALLOW_SET_RATE)>;
+					};
+
+					clock@b {
+						reg = <CK_SCMI_FLEXGEN_11>;
+						domain-name = "ck_flexgen_11";
+						clocks = <&rcc CK_FLEXGEN_11>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@c {
+						reg = <CK_SCMI_FLEXGEN_12>;
+						domain-name = "ck_flexgen_12";
+						clocks = <&rcc CK_FLEXGEN_12>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@d {
+						reg = <CK_SCMI_FLEXGEN_13>;
+						domain-name = "ck_flexgen_13";
+						clocks = <&rcc CK_FLEXGEN_13>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@e {
+						reg = <CK_SCMI_FLEXGEN_14>;
+						domain-name = "ck_flexgen_14";
+						clocks = <&rcc CK_FLEXGEN_14>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@f {
+						reg = <CK_SCMI_FLEXGEN_15>;
+						domain-name = "ck_flexgen_15";
+						clocks = <&rcc CK_FLEXGEN_15>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@10 {
+						reg = <CK_SCMI_FLEXGEN_16>;
+						domain-name = "ck_flexgen_16";
+						clocks = <&rcc CK_FLEXGEN_16>;
+						flags = <(SCMI_CLOCK_DEFAULT_ENABLED |
+							  SCMI_CLOCK_ALLOW_SET_RATE)>;
+					};
+
+					clock@11 {
+						reg = <CK_SCMI_FLEXGEN_17>;
+						domain-name = "ck_flexgen_17";
+						clocks = <&rcc CK_FLEXGEN_17>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@12 {
+						reg = <CK_SCMI_FLEXGEN_18>;
+						domain-name = "ck_flexgen_18";
+						clocks = <&rcc CK_FLEXGEN_18>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@13 {
+						reg = <CK_SCMI_FLEXGEN_19>;
+						domain-name = "ck_flexgen_19";
+						clocks = <&rcc CK_FLEXGEN_19>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@14 {
+						reg = <CK_SCMI_FLEXGEN_20>;
+						domain-name = "ck_flexgen_20";
+						clocks = <&rcc CK_FLEXGEN_20>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@15 {
+						reg = <CK_SCMI_FLEXGEN_21>;
+						domain-name = "ck_flexgen_21";
+						clocks = <&rcc CK_FLEXGEN_21>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@16 {
+						reg = <CK_SCMI_FLEXGEN_22>;
+						domain-name = "ck_flexgen_22";
+						clocks = <&rcc CK_FLEXGEN_22>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@17 {
+						reg = <CK_SCMI_FLEXGEN_23>;
+						domain-name = "ck_flexgen_23";
+						clocks = <&rcc CK_FLEXGEN_23>;
+						flags = <(SCMI_CLOCK_DEFAULT_ENABLED |
+							  SCMI_CLOCK_ALLOW_SET_RATE)>;
+					};
+
+					clock@18 {
+						reg = <CK_SCMI_FLEXGEN_24>;
+						domain-name = "ck_flexgen_24";
+						clocks = <&rcc CK_FLEXGEN_24>;
+						flags = <(SCMI_CLOCK_DEFAULT_ENABLED |
+							  SCMI_CLOCK_ALLOW_SET_RATE)>;
+					};
+
+					clock@19 {
+						reg = <CK_SCMI_FLEXGEN_25>;
+						domain-name = "ck_flexgen_25";
+						clocks = <&rcc CK_FLEXGEN_25>;
+						flags = <(SCMI_CLOCK_DEFAULT_ENABLED |
+							  SCMI_CLOCK_ALLOW_SET_RATE)>;
+					};
+
+					clock@1a {
+						reg = <CK_SCMI_FLEXGEN_26>;
+						domain-name = "ck_flexgen_26";
+						clocks = <&rcc CK_FLEXGEN_26>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@1b {
+						reg = <CK_SCMI_FLEXGEN_27>;
+						domain-name = "ck_flexgen_27";
+						clocks = <&rcc CK_FLEXGEN_27>;
+						flags = <(SCMI_CLOCK_DEFAULT_ENABLED |
+							  SCMI_CLOCK_ALLOW_SET_RATE)>;
+					};
+
+					clock@1c {
+						reg = <CK_SCMI_FLEXGEN_28>;
+						domain-name = "ck_flexgen_28";
+						clocks = <&rcc CK_FLEXGEN_28>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@1d {
+						reg = <CK_SCMI_FLEXGEN_29>;
+						domain-name = "ck_flexgen_29";
+						clocks = <&rcc CK_FLEXGEN_29>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@1e {
+						reg = <CK_SCMI_FLEXGEN_30>;
+						domain-name = "ck_flexgen_30";
+						clocks = <&rcc CK_FLEXGEN_30>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@1f {
+						reg = <CK_SCMI_FLEXGEN_31>;
+						domain-name = "ck_flexgen_31";
+						clocks = <&rcc CK_FLEXGEN_31>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@20 {
+						reg = <CK_SCMI_FLEXGEN_32>;
+						domain-name = "ck_flexgen_32";
+						clocks = <&rcc CK_FLEXGEN_32>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@21 {
+						reg = <CK_SCMI_FLEXGEN_33>;
+						domain-name = "ck_flexgen_33";
+						clocks = <&rcc CK_FLEXGEN_33>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@22 {
+						reg = <CK_SCMI_FLEXGEN_34>;
+						domain-name = "ck_flexgen_34";
+						clocks = <&rcc CK_FLEXGEN_34>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@23 {
+						reg = <CK_SCMI_FLEXGEN_35>;
+						domain-name = "ck_flexgen_35";
+						clocks = <&rcc CK_FLEXGEN_35>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@24 {
+						reg = <CK_SCMI_FLEXGEN_36>;
+						domain-name = "ck_flexgen_36";
+						clocks = <&rcc CK_FLEXGEN_36>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@25 {
+						reg = <CK_SCMI_FLEXGEN_37>;
+						domain-name = "ck_flexgen_37";
+						clocks = <&rcc CK_FLEXGEN_37>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@26 {
+						reg = <CK_SCMI_FLEXGEN_38>;
+						domain-name = "ck_flexgen_38";
+						clocks = <&rcc CK_FLEXGEN_38>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@27 {
+						reg = <CK_SCMI_FLEXGEN_39>;
+						domain-name = "ck_flexgen_39";
+						clocks = <&rcc CK_FLEXGEN_39>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@28 {
+						reg = <CK_SCMI_FLEXGEN_40>;
+						domain-name = "ck_flexgen_40";
+						clocks = <&rcc CK_FLEXGEN_40>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@29 {
+						reg = <CK_SCMI_FLEXGEN_41>;
+						domain-name = "ck_flexgen_41";
+						clocks = <&rcc CK_FLEXGEN_41>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@2a {
+						reg = <CK_SCMI_FLEXGEN_42>;
+						domain-name = "ck_flexgen_42";
+						clocks = <&rcc CK_FLEXGEN_42>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@2b {
+						reg = <CK_SCMI_FLEXGEN_43>;
+						domain-name = "ck_flexgen_43";
+						clocks = <&rcc CK_FLEXGEN_43>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@2c {
+						reg = <CK_SCMI_FLEXGEN_44>;
+						domain-name = "ck_flexgen_44";
+						clocks = <&rcc CK_FLEXGEN_44>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@2d {
+						reg = <CK_SCMI_FLEXGEN_45>;
+						domain-name = "ck_flexgen_45";
+						clocks = <&rcc CK_FLEXGEN_45>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@2e {
+						reg = <CK_SCMI_FLEXGEN_46>;
+						domain-name = "ck_flexgen_46";
+						clocks = <&rcc CK_FLEXGEN_46>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@2f {
+						reg = <CK_SCMI_FLEXGEN_47>;
+						domain-name = "ck_flexgen_47";
+						clocks = <&rcc CK_FLEXGEN_47>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@30 {
+						reg = <CK_SCMI_FLEXGEN_48>;
+						domain-name = "ck_flexgen_48";
+						clocks = <&rcc CK_FLEXGEN_48>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@31 {
+						reg = <CK_SCMI_FLEXGEN_49>;
+						domain-name = "ck_flexgen_49";
+						clocks = <&rcc CK_FLEXGEN_49>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@32 {
+						reg = <CK_SCMI_FLEXGEN_50>;
+						domain-name = "ck_flexgen_50";
+						clocks = <&rcc CK_FLEXGEN_50>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@33 {
+						reg = <CK_SCMI_FLEXGEN_51>;
+						domain-name = "ck_flexgen_51";
+						clocks = <&rcc CK_FLEXGEN_51>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@34 {
+						reg = <CK_SCMI_FLEXGEN_52>;
+						domain-name = "ck_flexgen_52";
+						clocks = <&rcc CK_FLEXGEN_52>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@35 {
+						reg = <CK_SCMI_FLEXGEN_53>;
+						domain-name = "ck_flexgen_53";
+						clocks = <&rcc CK_FLEXGEN_53>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@36 {
+						reg = <CK_SCMI_FLEXGEN_54>;
+						domain-name = "ck_flexgen_54";
+						clocks = <&rcc CK_FLEXGEN_54>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@37 {
+						reg = <CK_SCMI_FLEXGEN_55>;
+						domain-name = "ck_flexgen_55";
+						clocks = <&rcc CK_FLEXGEN_55>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@38 {
+						reg = <CK_SCMI_FLEXGEN_56>;
+						domain-name = "ck_flexgen_56";
+						clocks = <&rcc CK_FLEXGEN_56>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@39 {
+						reg = <CK_SCMI_FLEXGEN_57>;
+						domain-name = "ck_flexgen_57";
+						clocks = <&rcc CK_FLEXGEN_57>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@3a {
+						reg = <CK_SCMI_FLEXGEN_58>;
+						domain-name = "ck_flexgen_58";
+						clocks = <&rcc CK_FLEXGEN_58>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@3b {
+						reg = <CK_SCMI_FLEXGEN_59>;
+						domain-name = "ck_flexgen_59";
+						clocks = <&rcc CK_FLEXGEN_59>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@3c {
+						reg = <CK_SCMI_FLEXGEN_60>;
+						domain-name = "ck_flexgen_60";
+						clocks = <&rcc CK_FLEXGEN_60>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@3d {
+						reg = <CK_SCMI_FLEXGEN_61>;
+						domain-name = "ck_flexgen_61";
+						clocks = <&rcc CK_FLEXGEN_61>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@3e {
+						reg = <CK_SCMI_FLEXGEN_62>;
+						domain-name = "ck_flexgen_62";
+						clocks = <&rcc CK_FLEXGEN_62>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@3f {
+						reg = <CK_SCMI_FLEXGEN_63>;
+						domain-name = "ck_flexgen_63";
+						clocks = <&rcc CK_FLEXGEN_63>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@40 {
+						reg = <CK_SCMI_ICN_LS_MCU>;
+						domain-name = "ck_icn_ls_mcu";
+						clocks = <&rcc CK_ICN_LS_MCU>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@41 {
+						reg = <CK_SCMI_HSE>;
+						domain-name = "hse_ck";
+						clocks = <&rcc HSE_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@42 {
+						reg = <CK_SCMI_LSE>;
+						domain-name = "lse_ck";
+						clocks = <&rcc LSE_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@43 {
+						reg = <CK_SCMI_HSI>;
+						domain-name = "hsi_ck";
+						clocks = <&rcc HSI_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@44 {
+						reg = <CK_SCMI_LSI>;
+						domain-name = "lsi_ck";
+						clocks = <&rcc LSI_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@45 {
+						reg = <CK_SCMI_MSI>;
+						domain-name = "msi_ck";
+						clocks = <&rcc MSI_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@46 {
+						reg = <CK_SCMI_HSE_DIV2>;
+						domain-name = "hse_div2_ck";
+						clocks = <&rcc HSE_DIV2_CK>;
+					};
+
+					clock@47 {
+						reg = <CK_SCMI_CPU1>;
+						domain-name = "ck_cpu1";
+						clocks = <&rcc CK_CPU1>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@48 {
+						reg = <CK_SCMI_SYSCPU1>;
+						domain-name = "ck_bus_syscpu1";
+						clocks = <&rcc CK_BUS_SYSCPU1>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@49 {
+						reg = <CK_SCMI_PLL2>;
+						domain-name = "ck_pll2";
+						clocks = <&rcc PLL2_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@4a {
+						reg = <CK_SCMI_PLL3>;
+						domain-name = "ck_pll3";
+						clocks = <&rcc PLL3_CK>;
+					};
+
+					clock@4b {
+						reg = <CK_SCMI_RTC>;
+						domain-name = "ck_bus_rtc";
+						clocks = <&rcc CK_BUS_RTC>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@4c {
+						reg = <CK_SCMI_RTCCK>;
+						domain-name = "rtc_ck";
+						clocks = <&rcc RTC_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@4d {
+						reg = <CK_SCMI_ICN_APB1>;
+						domain-name = "ck_icn_apb1";
+						clocks = <&rcc CK_ICN_APB1>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@4e {
+						reg = <CK_SCMI_ICN_APB2>;
+						domain-name = "ck_icn_apb2";
+						clocks = <&rcc CK_ICN_APB2>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@4f {
+						reg = <CK_SCMI_ICN_APB3>;
+						domain-name = "ck_icn_apb3";
+						clocks = <&rcc CK_ICN_APB3>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@50 {
+						reg = <CK_SCMI_ICN_APB4>;
+						domain-name = "ck_icn_apb4";
+						clocks = <&rcc CK_ICN_APB4>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@51 {
+						reg = <CK_SCMI_ICN_APBDBG>;
+						domain-name = "ck_icn_apbdbg";
+						clocks = <&rcc CK_ICN_APBDBG>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@52 {
+						reg = <CK_SCMI_TIMG1>;
+						domain-name = "timg1_ck";
+						clocks = <&rcc TIMG1_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@53 {
+						reg = <CK_SCMI_TIMG2>;
+						domain-name = "timg2_ck";
+						clocks = <&rcc TIMG2_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@54 {
+						reg = <CK_SCMI_BKPSRAM>;
+						domain-name = "ck_bus_bkpsram";
+						clocks = <&rcc CK_BUS_BKPSRAM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@55 {
+						reg = <CK_SCMI_BSEC>;
+						domain-name = "ck_bus_bsec";
+						clocks = <&rcc CK_BUS_BSEC>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@57 {
+						reg = <CK_SCMI_BUS_ETR>;
+						domain-name = "ck_icn_p_etr";
+						clocks = <&rcc CK_BUS_ETR>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@58 {
+						reg = <CK_SCMI_FMC>;
+						domain-name = "ck_ker_fmc";
+						clocks = <&rcc CK_KER_FMC>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@59 {
+						reg = <CK_SCMI_GPIOA>;
+						domain-name = "ck_bus_gpioa";
+						clocks = <&rcc CK_BUS_GPIOA>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@5a {
+						reg = <CK_SCMI_GPIOB>;
+						domain-name = "ck_bus_gpiob";
+						clocks = <&rcc CK_BUS_GPIOB>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@5b {
+						reg = <CK_SCMI_GPIOC>;
+						domain-name = "ck_bus_gpioc";
+						clocks = <&rcc CK_BUS_GPIOC>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@5c {
+						reg = <CK_SCMI_GPIOD>;
+						domain-name = "ck_bus_gpiod";
+						clocks = <&rcc CK_BUS_GPIOD>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@5d {
+						reg = <CK_SCMI_GPIOE>;
+						domain-name = "ck_bus_gpioe";
+						clocks = <&rcc CK_BUS_GPIOE>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@5e {
+						reg = <CK_SCMI_GPIOF>;
+						domain-name = "ck_bus_gpiof";
+						clocks = <&rcc CK_BUS_GPIOF>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@5f {
+						reg = <CK_SCMI_GPIOG>;
+						domain-name = "ck_bus_gpiog";
+						clocks = <&rcc CK_BUS_GPIOG>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@60 {
+						reg = <CK_SCMI_GPIOH>;
+						domain-name = "ck_bus_gpioh";
+						clocks = <&rcc CK_BUS_GPIOH>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@61 {
+						reg = <CK_SCMI_GPIOI>;
+						domain-name = "ck_bus_gpioi";
+						clocks = <&rcc CK_BUS_GPIOI>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@62 {
+						reg = <CK_SCMI_GPIOJ>;
+						domain-name = "ck_bus_gpioj";
+						clocks = <&rcc CK_BUS_GPIOJ>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@63 {
+						reg = <CK_SCMI_GPIOK>;
+						domain-name = "ck_bus_gpiok";
+						clocks = <&rcc CK_BUS_GPIOK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@64 {
+						reg = <CK_SCMI_GPIOZ>;
+						domain-name = "ck_bus_gpioz";
+						clocks = <&rcc CK_BUS_GPIOZ>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@65 {
+						reg = <CK_SCMI_HPDMA1>;
+						domain-name = "ck_bus_hpdma1";
+						clocks = <&rcc CK_BUS_HPDMA1>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@66 {
+						reg = <CK_SCMI_HPDMA2>;
+						domain-name = "ck_bus_hpdma2";
+						clocks = <&rcc CK_BUS_HPDMA2>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@67 {
+						reg = <CK_SCMI_HPDMA3>;
+						domain-name = "ck_bus_hpdma3";
+						clocks = <&rcc CK_BUS_HPDMA3>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@68 {
+						reg = <CK_SCMI_HSEM>;
+						domain-name = "ck_bus_hsem";
+						clocks = <&rcc CK_BUS_HSEM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@69 {
+						reg = <CK_SCMI_IPCC1>;
+						domain-name = "ck_bus_ipcc1";
+						clocks = <&rcc CK_BUS_IPCC1>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@6a {
+						reg = <CK_SCMI_IPCC2>;
+						domain-name = "ck_bus_ipcc2";
+						clocks = <&rcc CK_BUS_IPCC2>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@6b {
+						reg = <CK_SCMI_LPDMA>;
+						domain-name = "ck_bus_lpdma";
+						clocks = <&rcc CK_BUS_LPDMA>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@6c {
+						reg = <CK_SCMI_RETRAM>;
+						domain-name = "ck_bus_retram";
+						clocks = <&rcc CK_BUS_RETRAM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@6d {
+						reg = <CK_SCMI_SRAM1>;
+						domain-name = "ck_bus_sram1";
+						clocks = <&rcc CK_BUS_SRAM1>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@6e {
+						reg = <CK_SCMI_SRAM2>;
+						domain-name = "ck_bus_sram2";
+						clocks = <&rcc CK_BUS_SRAM2>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@6f {
+						reg = <CK_SCMI_LPSRAM1>;
+						domain-name = "ck_icn_lpsram1";
+						clocks = <&rcc CK_BUS_LPSRAM1>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@70 {
+						reg = <CK_SCMI_LPSRAM2>;
+						domain-name = "ck_icn_lpsram2";
+						clocks = <&rcc CK_BUS_LPSRAM2>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@71 {
+						reg = <CK_SCMI_LPSRAM3>;
+						domain-name = "ck_icn_lpsram3";
+						clocks = <&rcc CK_BUS_LPSRAM3>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@72 {
+						reg = <CK_SCMI_VDERAM>;
+						domain-name = "ck_icn_s_vderam";
+						clocks = <&rcc CK_BUS_VDERAM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@73 {
+						reg = <CK_SCMI_SYSRAM>;
+						domain-name = "ck_icn_s_sysram";
+						clocks = <&rcc CK_BUS_SYSRAM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@74 {
+						reg = <CK_SCMI_OSPI1>;
+						domain-name = "ck_ker_ospi1";
+						clocks = <&rcc CK_KER_OSPI1>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@75 {
+						reg = <CK_SCMI_OSPI2>;
+						domain-name = "ck_ker_ospi2";
+						clocks = <&rcc CK_KER_OSPI2>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@76 {
+						reg = <CK_SCMI_TPIU>;
+						domain-name = "ck_ker_tpiu";
+						clocks = <&rcc CK_KER_TPIU>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@77 {
+						reg = <CK_SCMI_SYSDBG>;
+						domain-name = "ck_sys_dbg";
+						clocks = <&rcc CK_SYSDBG>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@78 {
+						reg = <CK_SCMI_SYSATB>;
+						domain-name = "ck_sys_atb";
+						clocks = <&rcc CK_BUS_SYSATB>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@79 {
+						reg = <CK_SCMI_TSDBG>;
+						domain-name = "ck_ker_tsdbg";
+						clocks = <&rcc CK_KER_TSDBG>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@7a {
+						reg = <CK_SCMI_BUS_STM>;
+						domain-name = "ck_icn_p_stm";
+						clocks = <&rcc CK_BUS_STM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@7b {
+						reg = <CK_SCMI_KER_STM>;
+						domain-name = "ck_icn_s_stm";
+						clocks = <&rcc CK_KER_STM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@7c {
+						reg = <CK_SCMI_KER_ETR>;
+						domain-name = "ck_icn_m_etr";
+						clocks = <&rcc CK_KER_ETR>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@7d {
+						reg = <CK_SCMI_HSI_KER_CK>;
+						domain-name = "hsi_ker_ck";
+						clocks = <&rcc HSI_KER_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@7e {
+						reg = <CK_SCMI_HSE_KER_CK>;
+						domain-name = "hse_ker_ck";
+						clocks = <&rcc HSE_KER_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@7f {
+						reg = <CK_SCMI_MSI_KER_CK>;
+						domain-name = "msi_ker_ck";
+						clocks = <&rcc MSI_KER_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@80 {
+						reg = <CK_SCMI_GPIOZ_AM>;
+						domain-name = "ck_gpioz_am";
+						clocks = <&rcc CK_GPIOZ_AM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@81 {
+						reg = <CK_SCMI_LPDMA_AM>;
+						domain-name = "ck_lpdma_am";
+						clocks = <&rcc CK_LPDMA_AM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@82 {
+						reg = <CK_SCMI_RTC_AM>;
+						domain-name = "ck_rtc_am";
+						clocks = <&rcc CK_RTC_AM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@83 {
+						reg = <CK_SCMI_IPCC2_AM>;
+						domain-name = "ck_ipcc2_am";
+						clocks = <&rcc CK_IPCC2_AM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+				};
+			};
+
+			scmi_reset: protocol@16 {
+				reg = <0x16>;
+
+				resets {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					#reset-cells = <1>;
+
+					reset@0 {
+						reg = <RST_SCMI_C1_R>;
+						domain-name = "c1";
+						resets = <&rcc C1_R>;
+					};
+
+					reset@1 {
+						reg = <RST_SCMI_C2_R>;
+						domain-name = "c2";
+						resets = <&m33_rproc 0>;
+					};
+
+					reset@2 {
+						reg = <RST_SCMI_C1_HOLDBOOT_R>;
+						domain-name = "c1_holdboot";
+						resets = <&rcc C1_HOLDBOOT_R>;
+					};
+
+					reset@3 {
+						reg = <RST_SCMI_C2_HOLDBOOT_R>;
+						domain-name = "c2_holdboot";
+						resets = <&m33_rproc 1>;
+					};
+
+					reset@4 {
+						reg = <RST_SCMI_FMC>;
+						domain-name = "fmc";
+						resets = <&rcc FMC_R>;
+					};
+
+					reset@5 {
+						reg = <RST_SCMI_OSPI1>;
+						domain-name = "ospi1";
+						resets = <&rcc OSPI1_R>;
+					};
+
+					reset@6 {
+						reg = <RST_SCMI_OSPI1DLL>;
+						domain-name = "ospi1_ddl";
+						resets = <&rcc OSPI1DLL_R>;
+					};
+
+					reset@7 {
+						reg = <RST_SCMI_OSPI2>;
+						domain-name = "ospi2";
+						resets = <&rcc OSPI2_R>;
+					};
+
+					reset@8 {
+						reg = <RST_SCMI_OSPI2DLL>;
+						domain-name = "ospi2_ddl";
+						resets = <&rcc OSPI2DLL_R>;
+					};
+				};
+			};
+
+			scmi_regulator: protocol@17 {
+				reg = <0x17>;
+
+				scmi_regu: regulators {
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					voltd-vddio1 {
+						reg = <VOLTD_SCMI_VDDIO1>;
+						voltd-supply = <&vddio1>;
+					};
+
+					voltd-vddio2 {
+						reg = <VOLTD_SCMI_VDDIO2>;
+						voltd-supply = <&vddio2>;
+					};
+
+					voltd-vddio3 {
+						reg = <VOLTD_SCMI_VDDIO3>;
+						voltd-supply = <&vddio3>;
+					};
+
+					voltd-vddio4 {
+						reg = <VOLTD_SCMI_VDDIO4>;
+						voltd-supply = <&vddio4>;
+					};
+
+					voltd-vdda18adc {
+						reg = <VOLTD_SCMI_ADC>;
+						voltd-supply = <&vdda18adc>;
+					};
+				};
+			};
+		};
+
+		agent_m33_ns: agent@2 {
+			reg = <2>;
+			compatible = "arm,scmi";
+			scmi-channel-id = <0>;
+			mbox-names = "scmi_cm33";
+			mboxes = <&ipcc1 RIF_IPCC_CPU1_CHANNEL(16)>;
+			shmem = <&ipc_shmem>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			scmi_clock_m33: protocol@14 {
+				reg = <0x14>;
+
+				clocks {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					#clock-cells = <1>;
+
+					clock@0 {
+						reg = <CK_SCMI_ICN_HS_MCU>;
+						domain-name = "ck_icn_hs_mcu";
+						clocks = <&rcc CK_ICN_HS_MCU>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@1 {
+						reg = <CK_SCMI_ICN_SDMMC>;
+						domain-name = "ck_icn_sdmmc";
+						clocks = <&rcc CK_ICN_SDMMC>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@2 {
+						reg = <CK_SCMI_ICN_DDR>;
+						domain-name = "ck_icn_ddr";
+						clocks = <&rcc CK_ICN_DDR>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@3 {
+						reg = <CK_SCMI_ICN_DISPLAY>;
+						domain-name = "ck_icn_display";
+						clocks = <&rcc CK_ICN_DISPLAY>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@4 {
+						reg = <CK_SCMI_ICN_HSL>;
+						domain-name = "ck_icn_hsl";
+						clocks = <&rcc CK_ICN_HSL>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@5 {
+						reg = <CK_SCMI_ICN_NIC>;
+						domain-name = "ck_icn_nic";
+						clocks = <&rcc CK_ICN_NIC>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@6 {
+						reg = <CK_SCMI_ICN_VID>;
+						domain-name = "ck_icn_vid";
+						clocks = <&rcc CK_ICN_VID>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@7 {
+						reg = <CK_SCMI_FLEXGEN_07>;
+						domain-name = "ck_flexgen_07";
+						clocks = <&rcc CK_FLEXGEN_07>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@8 {
+						reg = <CK_SCMI_FLEXGEN_08>;
+						domain-name = "ck_flexgen_08";
+						clocks = <&rcc CK_FLEXGEN_08>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@9 {
+						reg = <CK_SCMI_FLEXGEN_09>;
+						domain-name = "ck_flexgen_09";
+						clocks = <&rcc CK_FLEXGEN_09>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@a {
+						reg = <CK_SCMI_FLEXGEN_10>;
+						domain-name = "ck_flexgen_10";
+						clocks = <&rcc CK_FLEXGEN_10>;
+						flags = <(SCMI_CLOCK_DEFAULT_ENABLED |
+							  SCMI_CLOCK_ALLOW_SET_RATE)>;
+					};
+
+					clock@b {
+						reg = <CK_SCMI_FLEXGEN_11>;
+						domain-name = "ck_flexgen_11";
+						clocks = <&rcc CK_FLEXGEN_11>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@c {
+						reg = <CK_SCMI_FLEXGEN_12>;
+						domain-name = "ck_flexgen_12";
+						clocks = <&rcc CK_FLEXGEN_12>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@d {
+						reg = <CK_SCMI_FLEXGEN_13>;
+						domain-name = "ck_flexgen_13";
+						clocks = <&rcc CK_FLEXGEN_13>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@e {
+						reg = <CK_SCMI_FLEXGEN_14>;
+						domain-name = "ck_flexgen_14";
+						clocks = <&rcc CK_FLEXGEN_14>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@f {
+						reg = <CK_SCMI_FLEXGEN_15>;
+						domain-name = "ck_flexgen_15";
+						clocks = <&rcc CK_FLEXGEN_15>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@10 {
+						reg = <CK_SCMI_FLEXGEN_16>;
+						domain-name = "ck_flexgen_16";
+						clocks = <&rcc CK_FLEXGEN_16>;
+						flags = <(SCMI_CLOCK_DEFAULT_ENABLED |
+							  SCMI_CLOCK_ALLOW_SET_RATE)>;
+					};
+
+					clock@11 {
+						reg = <CK_SCMI_FLEXGEN_17>;
+						domain-name = "ck_flexgen_17";
+						clocks = <&rcc CK_FLEXGEN_17>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@12 {
+						reg = <CK_SCMI_FLEXGEN_18>;
+						domain-name = "ck_flexgen_18";
+						clocks = <&rcc CK_FLEXGEN_18>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@13 {
+						reg = <CK_SCMI_FLEXGEN_19>;
+						domain-name = "ck_flexgen_19";
+						clocks = <&rcc CK_FLEXGEN_19>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@14 {
+						reg = <CK_SCMI_FLEXGEN_20>;
+						domain-name = "ck_flexgen_20";
+						clocks = <&rcc CK_FLEXGEN_20>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@15 {
+						reg = <CK_SCMI_FLEXGEN_21>;
+						domain-name = "ck_flexgen_21";
+						clocks = <&rcc CK_FLEXGEN_21>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@16 {
+						reg = <CK_SCMI_FLEXGEN_22>;
+						domain-name = "ck_flexgen_22";
+						clocks = <&rcc CK_FLEXGEN_22>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@17 {
+						reg = <CK_SCMI_FLEXGEN_23>;
+						domain-name = "ck_flexgen_23";
+						clocks = <&rcc CK_FLEXGEN_23>;
+						flags = <(SCMI_CLOCK_DEFAULT_ENABLED |
+							  SCMI_CLOCK_ALLOW_SET_RATE)>;
+					};
+
+					clock@18 {
+						reg = <CK_SCMI_FLEXGEN_24>;
+						domain-name = "ck_flexgen_24";
+						clocks = <&rcc CK_FLEXGEN_24>;
+						flags = <(SCMI_CLOCK_DEFAULT_ENABLED |
+							  SCMI_CLOCK_ALLOW_SET_RATE)>;
+					};
+
+					clock@19 {
+						reg = <CK_SCMI_FLEXGEN_25>;
+						domain-name = "ck_flexgen_25";
+						clocks = <&rcc CK_FLEXGEN_25>;
+						flags = <(SCMI_CLOCK_DEFAULT_ENABLED |
+							  SCMI_CLOCK_ALLOW_SET_RATE)>;
+					};
+
+					clock@1a {
+						reg = <CK_SCMI_FLEXGEN_26>;
+						domain-name = "ck_flexgen_26";
+						clocks = <&rcc CK_FLEXGEN_26>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@1b {
+						reg = <CK_SCMI_FLEXGEN_27>;
+						domain-name = "ck_flexgen_27";
+						clocks = <&rcc CK_FLEXGEN_27>;
+						flags = <(SCMI_CLOCK_DEFAULT_ENABLED |
+							  SCMI_CLOCK_ALLOW_SET_RATE)>;
+					};
+
+					clock@1c {
+						reg = <CK_SCMI_FLEXGEN_28>;
+						domain-name = "ck_flexgen_28";
+						clocks = <&rcc CK_FLEXGEN_28>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@1d {
+						reg = <CK_SCMI_FLEXGEN_29>;
+						domain-name = "ck_flexgen_29";
+						clocks = <&rcc CK_FLEXGEN_29>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@1e {
+						reg = <CK_SCMI_FLEXGEN_30>;
+						domain-name = "ck_flexgen_30";
+						clocks = <&rcc CK_FLEXGEN_30>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@1f {
+						reg = <CK_SCMI_FLEXGEN_31>;
+						domain-name = "ck_flexgen_31";
+						clocks = <&rcc CK_FLEXGEN_31>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@20 {
+						reg = <CK_SCMI_FLEXGEN_32>;
+						domain-name = "ck_flexgen_32";
+						clocks = <&rcc CK_FLEXGEN_32>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@21 {
+						reg = <CK_SCMI_FLEXGEN_33>;
+						domain-name = "ck_flexgen_33";
+						clocks = <&rcc CK_FLEXGEN_33>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@22 {
+						reg = <CK_SCMI_FLEXGEN_34>;
+						domain-name = "ck_flexgen_34";
+						clocks = <&rcc CK_FLEXGEN_34>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@23 {
+						reg = <CK_SCMI_FLEXGEN_35>;
+						domain-name = "ck_flexgen_35";
+						clocks = <&rcc CK_FLEXGEN_35>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@24 {
+						reg = <CK_SCMI_FLEXGEN_36>;
+						domain-name = "ck_flexgen_36";
+						clocks = <&rcc CK_FLEXGEN_36>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@25 {
+						reg = <CK_SCMI_FLEXGEN_37>;
+						domain-name = "ck_flexgen_37";
+						clocks = <&rcc CK_FLEXGEN_37>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@26 {
+						reg = <CK_SCMI_FLEXGEN_38>;
+						domain-name = "ck_flexgen_38";
+						clocks = <&rcc CK_FLEXGEN_38>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@27 {
+						reg = <CK_SCMI_FLEXGEN_39>;
+						domain-name = "ck_flexgen_39";
+						clocks = <&rcc CK_FLEXGEN_39>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@28 {
+						reg = <CK_SCMI_FLEXGEN_40>;
+						domain-name = "ck_flexgen_40";
+						clocks = <&rcc CK_FLEXGEN_40>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@29 {
+						reg = <CK_SCMI_FLEXGEN_41>;
+						domain-name = "ck_flexgen_41";
+						clocks = <&rcc CK_FLEXGEN_41>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@2a {
+						reg = <CK_SCMI_FLEXGEN_42>;
+						domain-name = "ck_flexgen_42";
+						clocks = <&rcc CK_FLEXGEN_42>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@2b {
+						reg = <CK_SCMI_FLEXGEN_43>;
+						domain-name = "ck_flexgen_43";
+						clocks = <&rcc CK_FLEXGEN_43>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@2c {
+						reg = <CK_SCMI_FLEXGEN_44>;
+						domain-name = "ck_flexgen_44";
+						clocks = <&rcc CK_FLEXGEN_44>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@2d {
+						reg = <CK_SCMI_FLEXGEN_45>;
+						domain-name = "ck_flexgen_45";
+						clocks = <&rcc CK_FLEXGEN_45>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@2e {
+						reg = <CK_SCMI_FLEXGEN_46>;
+						domain-name = "ck_flexgen_46";
+						clocks = <&rcc CK_FLEXGEN_46>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@2f {
+						reg = <CK_SCMI_FLEXGEN_47>;
+						domain-name = "ck_flexgen_47";
+						clocks = <&rcc CK_FLEXGEN_47>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@30 {
+						reg = <CK_SCMI_FLEXGEN_48>;
+						domain-name = "ck_flexgen_48";
+						clocks = <&rcc CK_FLEXGEN_48>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@31 {
+						reg = <CK_SCMI_FLEXGEN_49>;
+						domain-name = "ck_flexgen_49";
+						clocks = <&rcc CK_FLEXGEN_49>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@32 {
+						reg = <CK_SCMI_FLEXGEN_50>;
+						domain-name = "ck_flexgen_50";
+						clocks = <&rcc CK_FLEXGEN_50>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@33 {
+						reg = <CK_SCMI_FLEXGEN_51>;
+						domain-name = "ck_flexgen_51";
+						clocks = <&rcc CK_FLEXGEN_51>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@34 {
+						reg = <CK_SCMI_FLEXGEN_52>;
+						domain-name = "ck_flexgen_52";
+						clocks = <&rcc CK_FLEXGEN_52>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@35 {
+						reg = <CK_SCMI_FLEXGEN_53>;
+						domain-name = "ck_flexgen_53";
+						clocks = <&rcc CK_FLEXGEN_53>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@36 {
+						reg = <CK_SCMI_FLEXGEN_54>;
+						domain-name = "ck_flexgen_54";
+						clocks = <&rcc CK_FLEXGEN_54>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@37 {
+						reg = <CK_SCMI_FLEXGEN_55>;
+						domain-name = "ck_flexgen_55";
+						clocks = <&rcc CK_FLEXGEN_55>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@38 {
+						reg = <CK_SCMI_FLEXGEN_56>;
+						domain-name = "ck_flexgen_56";
+						clocks = <&rcc CK_FLEXGEN_56>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@39 {
+						reg = <CK_SCMI_FLEXGEN_57>;
+						domain-name = "ck_flexgen_57";
+						clocks = <&rcc CK_FLEXGEN_57>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@3a {
+						reg = <CK_SCMI_FLEXGEN_58>;
+						domain-name = "ck_flexgen_58";
+						clocks = <&rcc CK_FLEXGEN_58>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@3b {
+						reg = <CK_SCMI_FLEXGEN_59>;
+						domain-name = "ck_flexgen_59";
+						clocks = <&rcc CK_FLEXGEN_59>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@3c {
+						reg = <CK_SCMI_FLEXGEN_60>;
+						domain-name = "ck_flexgen_60";
+						clocks = <&rcc CK_FLEXGEN_60>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@3d {
+						reg = <CK_SCMI_FLEXGEN_61>;
+						domain-name = "ck_flexgen_61";
+						clocks = <&rcc CK_FLEXGEN_61>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@3e {
+						reg = <CK_SCMI_FLEXGEN_62>;
+						domain-name = "ck_flexgen_62";
+						clocks = <&rcc CK_FLEXGEN_62>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@3f {
+						reg = <CK_SCMI_FLEXGEN_63>;
+						domain-name = "ck_flexgen_63";
+						clocks = <&rcc CK_FLEXGEN_63>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@40 {
+						reg = <CK_SCMI_ICN_LS_MCU>;
+						domain-name = "ck_icn_ls_mcu";
+						clocks = <&rcc CK_ICN_LS_MCU>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@41 {
+						reg = <CK_SCMI_HSE>;
+						domain-name = "hse_ck";
+						clocks = <&rcc HSE_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@42 {
+						reg = <CK_SCMI_LSE>;
+						domain-name = "lse_ck";
+						clocks = <&rcc LSE_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@43 {
+						reg = <CK_SCMI_HSI>;
+						domain-name = "hsi_ck";
+						clocks = <&rcc HSI_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@44 {
+						reg = <CK_SCMI_LSI>;
+						domain-name = "lsi_ck";
+						clocks = <&rcc LSI_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@45 {
+						reg = <CK_SCMI_MSI>;
+						domain-name = "msi_ck";
+						clocks = <&rcc MSI_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@46 {
+						reg = <CK_SCMI_HSE_DIV2>;
+						domain-name = "hse_div2_ck";
+						clocks = <&rcc HSE_DIV2_CK>;
+					};
+
+					clock@47 {
+						reg = <CK_SCMI_CPU1>;
+						domain-name = "ck_cpu1";
+						clocks = <&rcc CK_CPU1>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@48 {
+						reg = <CK_SCMI_SYSCPU1>;
+						domain-name = "ck_bus_syscpu1";
+						clocks = <&rcc CK_BUS_SYSCPU1>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@49 {
+						reg = <CK_SCMI_PLL2>;
+						domain-name = "ck_pll2";
+						clocks = <&rcc PLL2_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@4a {
+						reg = <CK_SCMI_PLL3>;
+						domain-name = "ck_pll3";
+						clocks = <&rcc PLL3_CK>;
+					};
+
+					clock@4b {
+						reg = <CK_SCMI_RTC>;
+						domain-name = "ck_bus_rtc";
+						clocks = <&rcc CK_BUS_RTC>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@4c {
+						reg = <CK_SCMI_RTCCK>;
+						domain-name = "rtc_ck";
+						clocks = <&rcc RTC_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@4d {
+						reg = <CK_SCMI_ICN_APB1>;
+						domain-name = "ck_icn_apb1";
+						clocks = <&rcc CK_ICN_APB1>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@4e {
+						reg = <CK_SCMI_ICN_APB2>;
+						domain-name = "ck_icn_apb2";
+						clocks = <&rcc CK_ICN_APB2>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@4f {
+						reg = <CK_SCMI_ICN_APB3>;
+						domain-name = "ck_icn_apb3";
+						clocks = <&rcc CK_ICN_APB3>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@50 {
+						reg = <CK_SCMI_ICN_APB4>;
+						domain-name = "ck_icn_apb4";
+						clocks = <&rcc CK_ICN_APB4>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+
+					clock@51 {
+						reg = <CK_SCMI_ICN_APBDBG>;
+						domain-name = "ck_icn_apbdbg";
+						clocks = <&rcc CK_ICN_APBDBG>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@52 {
+						reg = <CK_SCMI_TIMG1>;
+						domain-name = "timg1_ck";
+						clocks = <&rcc TIMG1_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@53 {
+						reg = <CK_SCMI_TIMG2>;
+						domain-name = "timg2_ck";
+						clocks = <&rcc TIMG2_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@54 {
+						reg = <CK_SCMI_BKPSRAM>;
+						domain-name = "ck_bus_bkpsram";
+						clocks = <&rcc CK_BUS_BKPSRAM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@55 {
+						reg = <CK_SCMI_BSEC>;
+						domain-name = "ck_bus_bsec";
+						clocks = <&rcc CK_BUS_BSEC>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@57 {
+						reg = <CK_SCMI_BUS_ETR>;
+						domain-name = "ck_icn_p_etr";
+						clocks = <&rcc CK_BUS_ETR>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@58 {
+						reg = <CK_SCMI_FMC>;
+						domain-name = "ck_ker_fmc";
+						clocks = <&rcc CK_KER_FMC>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@59 {
+						reg = <CK_SCMI_GPIOA>;
+						domain-name = "ck_bus_gpioa";
+						clocks = <&rcc CK_BUS_GPIOA>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@5a {
+						reg = <CK_SCMI_GPIOB>;
+						domain-name = "ck_bus_gpiob";
+						clocks = <&rcc CK_BUS_GPIOB>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@5b {
+						reg = <CK_SCMI_GPIOC>;
+						domain-name = "ck_bus_gpioc";
+						clocks = <&rcc CK_BUS_GPIOC>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@5c {
+						reg = <CK_SCMI_GPIOD>;
+						domain-name = "ck_bus_gpiod";
+						clocks = <&rcc CK_BUS_GPIOD>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@5d {
+						reg = <CK_SCMI_GPIOE>;
+						domain-name = "ck_bus_gpioe";
+						clocks = <&rcc CK_BUS_GPIOE>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@5e {
+						reg = <CK_SCMI_GPIOF>;
+						domain-name = "ck_bus_gpiof";
+						clocks = <&rcc CK_BUS_GPIOF>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@5f {
+						reg = <CK_SCMI_GPIOG>;
+						domain-name = "ck_bus_gpiog";
+						clocks = <&rcc CK_BUS_GPIOG>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@60 {
+						reg = <CK_SCMI_GPIOH>;
+						domain-name = "ck_bus_gpioh";
+						clocks = <&rcc CK_BUS_GPIOH>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@61 {
+						reg = <CK_SCMI_GPIOI>;
+						domain-name = "ck_bus_gpioi";
+						clocks = <&rcc CK_BUS_GPIOI>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@62 {
+						reg = <CK_SCMI_GPIOJ>;
+						domain-name = "ck_bus_gpioj";
+						clocks = <&rcc CK_BUS_GPIOJ>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@63 {
+						reg = <CK_SCMI_GPIOK>;
+						domain-name = "ck_bus_gpiok";
+						clocks = <&rcc CK_BUS_GPIOK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@64 {
+						reg = <CK_SCMI_GPIOZ>;
+						domain-name = "ck_bus_gpioz";
+						clocks = <&rcc CK_BUS_GPIOZ>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@65 {
+						reg = <CK_SCMI_HPDMA1>;
+						domain-name = "ck_bus_hpdma1";
+						clocks = <&rcc CK_BUS_HPDMA1>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@66 {
+						reg = <CK_SCMI_HPDMA2>;
+						domain-name = "ck_bus_hpdma2";
+						clocks = <&rcc CK_BUS_HPDMA2>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@67 {
+						reg = <CK_SCMI_HPDMA3>;
+						domain-name = "ck_bus_hpdma3";
+						clocks = <&rcc CK_BUS_HPDMA3>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@68 {
+						reg = <CK_SCMI_HSEM>;
+						domain-name = "ck_bus_hsem";
+						clocks = <&rcc CK_BUS_HSEM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@69 {
+						reg = <CK_SCMI_IPCC1>;
+						domain-name = "ck_bus_ipcc1";
+						clocks = <&rcc CK_BUS_IPCC1>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@6a {
+						reg = <CK_SCMI_IPCC2>;
+						domain-name = "ck_bus_ipcc2";
+						clocks = <&rcc CK_BUS_IPCC2>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@6b {
+						reg = <CK_SCMI_LPDMA>;
+						domain-name = "ck_bus_lpdma";
+						clocks = <&rcc CK_BUS_LPDMA>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@6c {
+						reg = <CK_SCMI_RETRAM>;
+						domain-name = "ck_bus_retram";
+						clocks = <&rcc CK_BUS_RETRAM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@6d {
+						reg = <CK_SCMI_SRAM1>;
+						domain-name = "ck_bus_sram1";
+						clocks = <&rcc CK_BUS_SRAM1>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@6e {
+						reg = <CK_SCMI_SRAM2>;
+						domain-name = "ck_bus_sram2";
+						clocks = <&rcc CK_BUS_SRAM2>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@6f {
+						reg = <CK_SCMI_LPSRAM1>;
+						domain-name = "ck_icn_lpsram1";
+						clocks = <&rcc CK_BUS_LPSRAM1>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@70 {
+						reg = <CK_SCMI_LPSRAM2>;
+						domain-name = "ck_icn_lpsram2";
+						clocks = <&rcc CK_BUS_LPSRAM2>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@71 {
+						reg = <CK_SCMI_LPSRAM3>;
+						domain-name = "ck_icn_lpsram3";
+						clocks = <&rcc CK_BUS_LPSRAM3>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@72 {
+						reg = <CK_SCMI_VDERAM>;
+						domain-name = "ck_icn_s_vderam";
+						clocks = <&rcc CK_BUS_VDERAM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@73 {
+						reg = <CK_SCMI_SYSRAM>;
+						domain-name = "ck_icn_s_sysram";
+						clocks = <&rcc CK_BUS_SYSRAM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@74 {
+						reg = <CK_SCMI_OSPI1>;
+						domain-name = "ck_ker_ospi1";
+						clocks = <&rcc CK_KER_OSPI1>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@75 {
+						reg = <CK_SCMI_OSPI2>;
+						domain-name = "ck_ker_ospi2";
+						clocks = <&rcc CK_KER_OSPI2>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@76 {
+						reg = <CK_SCMI_TPIU>;
+						domain-name = "ck_ker_tpiu";
+						clocks = <&rcc CK_KER_TPIU>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@77 {
+						reg = <CK_SCMI_SYSDBG>;
+						domain-name = "ck_sys_dbg";
+						clocks = <&rcc CK_SYSDBG>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@78 {
+						reg = <CK_SCMI_SYSATB>;
+						domain-name = "ck_sys_atb";
+						clocks = <&rcc CK_BUS_SYSATB>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@79 {
+						reg = <CK_SCMI_TSDBG>;
+						domain-name = "ck_ker_tsdbg";
+						clocks = <&rcc CK_KER_TSDBG>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@7a {
+						reg = <CK_SCMI_BUS_STM>;
+						domain-name = "ck_icn_p_stm";
+						clocks = <&rcc CK_BUS_STM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@7b {
+						reg = <CK_SCMI_KER_STM>;
+						domain-name = "ck_icn_s_stm";
+						clocks = <&rcc CK_KER_STM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@7c {
+						reg = <CK_SCMI_KER_ETR>;
+						domain-name = "ck_icn_m_etr";
+						clocks = <&rcc CK_KER_ETR>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@7d {
+						reg = <CK_SCMI_HSI_KER_CK>;
+						domain-name = "hsi_ker_ck";
+						clocks = <&rcc HSI_KER_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@7e {
+						reg = <CK_SCMI_HSE_KER_CK>;
+						domain-name = "hse_ker_ck";
+						clocks = <&rcc HSE_KER_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@7f {
+						reg = <CK_SCMI_MSI_KER_CK>;
+						domain-name = "msi_ker_ck";
+						clocks = <&rcc MSI_KER_CK>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@80 {
+						reg = <CK_SCMI_GPIOZ_AM>;
+						domain-name = "ck_gpioz_am";
+						clocks = <&rcc CK_GPIOZ_AM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@81 {
+						reg = <CK_SCMI_LPDMA_AM>;
+						domain-name = "ck_lpdma_am";
+						clocks = <&rcc CK_LPDMA_AM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@82 {
+						reg = <CK_SCMI_RTC_AM>;
+						domain-name = "ck_rtc_am";
+						clocks = <&rcc CK_RTC_AM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+
+					clock@83 {
+						reg = <CK_SCMI_IPCC2_AM>;
+						domain-name = "ck_ipcc2_am";
+						clocks = <&rcc CK_IPCC2_AM>;
+						flags = <SCMI_CLOCK_DEFAULT_ENABLED>;
+					};
+				};
+			};
+
+			scmi_reset_m33: protocol@16 {
+				reg = <0x16>;
+
+				resets {
+					#address-cells = <1>;
+					#size-cells = <0>;
+					#reset-cells = <1>;
+
+					reset@0 {
+						reg = <RST_SCMI_C1_R>;
+						domain-name = "c1";
+						resets = <&rcc C1_R>;
+					};
+
+					reset@1 {
+						reg = <RST_SCMI_C2_R>;
+						domain-name = "c2";
+						resets = <&m33_rproc 0>;
+					};
+
+					reset@2 {
+						reg = <RST_SCMI_C1_HOLDBOOT_R>;
+						domain-name = "c1_holdboot";
+						resets = <&rcc C1_HOLDBOOT_R>;
+					};
+
+					reset@3 {
+						reg = <RST_SCMI_C2_HOLDBOOT_R>;
+						domain-name = "c2_holdboot";
+						resets = <&m33_rproc 1>;
+					};
+
+					reset@4 {
+						reg = <RST_SCMI_FMC>;
+						domain-name = "fmc";
+						resets = <&rcc FMC_R>;
+					};
+
+					reset@5 {
+						reg = <RST_SCMI_OSPI1>;
+						domain-name = "ospi1";
+						resets = <&rcc OSPI1_R>;
+					};
+
+					reset@6 {
+						reg = <RST_SCMI_OSPI1DLL>;
+						domain-name = "ospi1_ddl";
+						resets = <&rcc OSPI1DLL_R>;
+					};
+
+					reset@7 {
+						reg = <RST_SCMI_OSPI2>;
+						domain-name = "ospi2";
+						resets = <&rcc OSPI2_R>;
+					};
+
+					reset@8 {
+						reg = <RST_SCMI_OSPI2DLL>;
+						domain-name = "ospi2_ddl";
+						resets = <&rcc OSPI2DLL_R>;
+					};
+				};
+			};
+
+			scmi_regulator_m33: protocol@17 {
+				reg = <0x17>;
+
+				regulators {
+					#address-cells = <1>;
+					#size-cells = <0>;
+
+					voltd-vdd33ucpd {
+						reg = <VOLTD_SCMI_UCPD>;
+						voltd-supply = <&vdd33ucpd>;
+					};
+				};
+			};
+		};
+	};
+
+	soc@0 {
+		compatible = "simple-bus";
+		#address-cells = <1>;
+		#size-cells = <1>;
+		interrupt-parent = <&intc>;
+		ranges = <0x0 0x0 0x0 0x80000000>;
+
+		hpdma1: dma-controller@40400000 {
+			compatible = "st,stm32-dma3";
+			reg = <0x40400000 0x1000>;
+			clocks = <&rcc CK_BUS_HPDMA1>;
+			resets = <&rcc HPDMA1_R>;
+			#dma-cells = <4>;
+		};
+
+		hpdma2: dma-controller@40410000 {
+			compatible = "st,stm32-dma3";
+			reg = <0x40410000 0x1000>;
+			clocks = <&rcc CK_BUS_HPDMA2>;
+			resets = <&rcc HPDMA2_R>;
+			#dma-cells = <4>;
+		};
+
+		hpdma3: dma-controller@40420000 {
+			compatible = "st,stm32-dma3";
+			reg = <0x40420000 0x1000>;
+			clocks = <&rcc CK_BUS_HPDMA3>;
+			resets = <&rcc HPDMA3_R>;
+			#dma-cells = <4>;
+		};
+
+		ipcc1: mailbox@40490000 {
+			compatible = "st,stm32mp25-ipcc";
+			reg = <0x40490000 0x400>;
+			interrupts = <GIC_SPI 173 IRQ_TYPE_LEVEL_HIGH>;
+			interrupt-names = "rx";
+			clocks = <&rcc CK_BUS_IPCC1>;
+		};
+
+		ommanager: ommanager@40500000 {
+			#address-cells = <2>;
+			#size-cells = <1>;
+			compatible = "st,stm32mp25-omm";
+			reg = <0x40500000 0x400>, <0x60000000 0x10000000>;
+			reg-names = "omm", "omm_mm";
+			clocks = <&rcc CK_BUS_OSPIIOM>;
+			resets = <&rcc OSPIIOM_R>;
+			st,syscfg-amcr = <&syscfg 0x2c00 0x7>;
+			status = "disabled";
+
+			ranges = <0 0 0x40430000 0x400>,
+				 <1 0 0x40440000 0x400>;
+
+			ospi1: spi@40430000 {
+				compatible = "st,stm32mp25-omi";
+				reg = <0 0 0x400>;
+				clocks = <&rcc CK_KER_OSPI1>;
+				resets = <&rcc OSPI1_R>, <&rcc OSPI1DLL_R>;
+				status = "disabled";
+			};
+
+			ospi2: spi@40440000 {
+				compatible = "st,stm32mp25-omi";
+				reg = <1 0 0x400>;
+				clocks = <&rcc CK_KER_OSPI2>;
+				resets = <&rcc OSPI2_R>, <&rcc OSPI2DLL_R>;
+				status = "disabled";
+			};
+		};
+
+		rifsc: bus@42080000 {
+			compatible = "st,stm32mp25-rifsc", "simple-bus";
+			reg = <0x42080000 0x1000>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			#access-controller-cells = <1>;
+
+			lptimer1: timer@40090000 {
+				compatible = "st,stm32mp25-lptimer";
+				reg = <0x40090000 0x400>;
+				interrupts = <GIC_SPI 166 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_KER_LPTIM1>;
+				clock-names = "mux";
+				#address-cells = <1>;
+				#size-cells = <0>;
+				access-controllers = <&rifsc STM32MP25_RIFSC_LPTIM1_ID>;
+				status = "disabled";
+
+				counter {
+					compatible = "st,stm32mp25-lptimer-counter";
+					status = "disabled";
+				};
+
+				pwm {
+					compatible = "st,stm32mp25-pwm-lp";
+					#pwm-cells = <3>;
+					status = "disabled";
+				};
+
+				timer {
+					compatible = "st,stm32mp25-lptimer-timer";
+					status = "disabled";
+				};
+
+				trigger@0 {
+					compatible = "st,stm32mp25-lptimer-trigger";
+					reg = <0>;
+					status = "disabled";
+				};
+			};
+
+			lptimer2: timer@400a0000 {
+				compatible = "st,stm32mp25-lptimer";
+				reg = <0x400a0000 0x400>;
+				interrupts = <GIC_SPI 215 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_KER_LPTIM2>;
+				clock-names = "mux";
+				#address-cells = <1>;
+				#size-cells = <0>;
+				access-controllers = <&rifsc STM32MP25_RIFSC_LPTIM2_ID>;
+				status = "disabled";
+
+				counter {
+					compatible = "st,stm32mp25-lptimer-counter";
+					status = "disabled";
+				};
+
+				pwm {
+					compatible = "st,stm32mp25-pwm-lp";
+					#pwm-cells = <3>;
+					status = "disabled";
+				};
+
+				timer {
+					compatible = "st,stm32mp25-lptimer-timer";
+					status = "disabled";
+				};
+
+				trigger@1 {
+					compatible = "st,stm32mp25-lptimer-trigger";
+					reg = <1>;
+					status = "disabled";
+				};
+			};
+
+			usart2: serial@400e0000 {
+				compatible = "st,stm32h7-uart";
+				reg = <0x400e0000 0x400>;
+				interrupts = <GIC_SPI 115 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_KER_USART2>;
+				access-controllers = <&rifsc STM32MP25_RIFSC_USART2_ID>;
+				status = "disabled";
+			};
+
+			usart3: serial@400f0000 {
+				compatible = "st,stm32h7-uart";
+				reg = <0x400f0000 0x400>;
+				interrupts = <GIC_SPI 116 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_KER_USART3>;
+				access-controllers = <&rifsc STM32MP25_RIFSC_USART3_ID>;
+				status = "disabled";
+			};
+
+			uart4: serial@40100000 {
+				compatible = "st,stm32h7-uart";
+				reg = <0x40100000 0x400>;
+				interrupts = <GIC_SPI 126 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_KER_UART4>;
+				access-controllers = <&rifsc STM32MP25_RIFSC_UART4_ID>;
+				status = "disabled";
+			};
+
+			uart5: serial@40110000 {
+				compatible = "st,stm32h7-uart";
+				reg = <0x40110000 0x400>;
+				interrupts = <GIC_SPI 127 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_KER_UART5>;
+				access-controllers = <&rifsc STM32MP25_RIFSC_UART5_ID>;
+				status = "disabled";
+			};
+
+			i2c1: i2c@40120000 {
+				compatible = "st,stm32mp25-i2c";
+				reg = <0x40120000 0x400>;
+				clocks = <&rcc CK_KER_I2C1>;
+				resets = <&rcc I2C1_R>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				i2c-analog-filter;
+				access-controllers = <&rifsc STM32MP25_RIFSC_I2C1_ID>;
+				status = "disabled";
+			};
+
+			i2c2: i2c@40130000 {
+				compatible = "st,stm32mp25-i2c";
+				reg = <0x40130000 0x400>;
+				clocks = <&rcc CK_KER_I2C2>;
+				resets = <&rcc I2C2_R>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				i2c-analog-filter;
+				access-controllers = <&rifsc STM32MP25_RIFSC_I2C2_ID>;
+				status = "disabled";
+			};
+
+			i2c3: i2c@40140000 {
+				compatible = "st,stm32mp25-i2c";
+				reg = <0x40140000 0x400>;
+				clocks = <&rcc CK_KER_I2C3>;
+				resets = <&rcc I2C3_R>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				i2c-analog-filter;
+				access-controllers = <&rifsc STM32MP25_RIFSC_I2C3_ID>;
+				status = "disabled";
+			};
+
+			i2c4: i2c@40150000 {
+				compatible = "st,stm32mp25-i2c";
+				reg = <0x40150000 0x400>;
+				clocks = <&rcc CK_KER_I2C4>;
+				resets = <&rcc I2C4_R>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				i2c-analog-filter;
+				access-controllers = <&rifsc STM32MP25_RIFSC_I2C4_ID>;
+				status = "disabled";
+			};
+
+			i2c5: i2c@40160000 {
+				compatible = "st,stm32mp25-i2c";
+				reg = <0x40160000 0x400>;
+				clocks = <&rcc CK_KER_I2C5>;
+				resets = <&rcc I2C5_R>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				i2c-analog-filter;
+				access-controllers = <&rifsc STM32MP25_RIFSC_I2C5_ID>;
+				status = "disabled";
+			};
+
+			i2c6: i2c@40170000 {
+				compatible = "st,stm32mp25-i2c";
+				reg = <0x40170000 0x400>;
+				clocks = <&rcc CK_KER_I2C6>;
+				resets = <&rcc I2C6_R>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				i2c-analog-filter;
+				access-controllers = <&rifsc STM32MP25_RIFSC_I2C6_ID>;
+				status = "disabled";
+			};
+
+			i2c7: i2c@40180000 {
+				compatible = "st,stm32mp25-i2c";
+				reg = <0x40180000 0x400>;
+				clocks = <&rcc CK_KER_I2C7>;
+				resets = <&rcc I2C7_R>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				i2c-analog-filter;
+				access-controllers = <&rifsc STM32MP25_RIFSC_I2C7_ID>;
+				status = "disabled";
+			};
+
+			usart6: serial@40220000 {
+				compatible = "st,stm32h7-uart";
+				reg = <0x40220000 0x400>;
+				interrupts = <GIC_SPI 136 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_KER_USART6>;
+				access-controllers = <&rifsc STM32MP25_RIFSC_USART6_ID>;
+				status = "disabled";
+			};
+
+			uart9: serial@402c0000 {
+				compatible = "st,stm32h7-uart";
+				reg = <0x402c0000 0x400>;
+				interrupts = <GIC_SPI 150 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_KER_UART9>;
+				access-controllers = <&rifsc STM32MP25_RIFSC_UART9_ID>;
+				status = "disabled";
+			};
+
+			usart1: serial@40330000 {
+				compatible = "st,stm32h7-uart";
+				reg = <0x40330000 0x400>;
+				interrupts = <GIC_SPI 114 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_KER_USART1>;
+				access-controllers = <&rifsc STM32MP25_RIFSC_USART1_ID>;
+				status = "disabled";
+			};
+
+			uart7: serial@40370000 {
+				compatible = "st,stm32h7-uart";
+				reg = <0x40370000 0x400>;
+				interrupts = <GIC_SPI 148 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_KER_UART7>;
+				access-controllers = <&rifsc STM32MP25_RIFSC_UART7_ID>;
+				status = "disabled";
+			};
+
+			uart8: serial@40380000 {
+				compatible = "st,stm32h7-uart";
+				reg = <0x40380000 0x400>;
+				interrupts = <GIC_SPI 149 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_KER_UART8>;
+				access-controllers = <&rifsc STM32MP25_RIFSC_UART8_ID>;
+				status = "disabled";
+			};
+
+			adc_12: adc@404e0000 {
+				compatible = "st,stm32mp25-adc-core";
+				reg = <0x404e0000 0x400>;
+				interrupts = <GIC_SPI 87 IRQ_TYPE_LEVEL_HIGH>,
+					<GIC_SPI 88 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_KER_ADC12>;
+				clock-names = "adc";
+				interrupt-controller;
+				#interrupt-cells = <1>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				access-controllers = <&rifsc 58>;
+				status = "disabled";
+
+				adc1: adc@0 {
+					compatible = "st,stm32mp25-adc";
+					reg = <0x0>;
+					interrupt-parent = <&adc_12>;
+					interrupts = <0>;
+					#io-channel-cells = <1>;
+					#address-cells = <1>;
+					#size-cells = <0>;
+					status = "disabled";
+					channel@14 {
+						reg = <14>;
+						label = "vrefint";
+					};
+				};
+
+				adc2: adc@100 {
+					compatible = "st,stm32mp25-adc";
+					reg = <0x100>;
+					interrupt-parent = <&adc_12>;
+					interrupts = <1>;
+					#io-channel-cells = <1>;
+					#address-cells = <1>;
+					#size-cells = <0>;
+					status = "disabled";
+					channel@14 {
+						reg = <14>;
+						label = "vrefint";
+					};
+					channel@15 {
+						reg = <15>;
+						label = "vddcore";
+					};
+					channel@17 {
+						reg = <17>;
+						label = "vddcpu";
+					};
+					channel@18 {
+						reg = <18>;
+						label = "vddgpu";
+					};
+				};
+			};
+
+			adc_3: adc@404f0000 {
+				compatible = "st,stm32mp25-adc-core";
+				reg = <0x404f0000 0x400>;
+				interrupts = <GIC_SPI 89 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_KER_ADC3>;
+				clock-names = "adc";
+				interrupt-controller;
+				#interrupt-cells = <1>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				access-controllers = <&rifsc 59>;
+				status = "disabled";
+
+				adc3: adc@0 {
+					compatible = "st,stm32mp25-adc";
+					reg = <0x0>;
+					interrupt-parent = <&adc_3>;
+					interrupts = <0>;
+					#io-channel-cells = <1>;
+					#address-cells = <1>;
+					#size-cells = <0>;
+					status = "disabled";
+					channel@14 {
+						reg = <14>;
+						label = "vrefint";
+					};
+					channel@15 {
+						reg = <15>;
+						label = "vddcore";
+					};
+					channel@17 {
+						reg = <17>;
+						label = "vddcpu";
+					};
+					channel@18 {
+						reg = <18>;
+						label = "vddgpu";
+					};
+				};
+			};
+
+			hash: hash@42010000  {
+				compatible = "st,stm32mp13-hash";
+				reg = <0x42010000  0x400>;
+				interrupts = <GIC_SPI 145 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_BUS_HASH>;
+				resets = <&rcc HASH_R>;
+				access-controllers = <&rifsc STM32MP25_RIFSC_HASH_ID>;
+				status = "disabled";
+			};
+
+			rng: rng@42020000 {
+				compatible = "st,stm32mp25-rng";
+				reg = <0x42020000 0x400>;
+				clocks = <&clk_rcbsec>, <&rcc CK_BUS_RNG>;
+				clock-names = "rng_clk", "rng_hclk";
+				resets = <&rcc RNG_R>;
+				access-controllers = <&rifsc STM32MP25_RIFSC_RNG_ID>;
+			};
+
+			iwdg1: watchdog@44010000 {
+				compatible = "st,stm32mp1-iwdg";
+				reg = <0x44010000 0x400>;
+				interrupts = <GIC_SPI 2 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_BUS_IWDG1>, <&rcc LSI_CK>;
+				clock-names = "pclk", "lsi";
+				access-controllers = <&rifsc STM32MP25_RIFSC_IWDG1_ID>;
+				status = "disabled";
+			};
+
+			iwdg2: watchdog@44020000 {
+				compatible = "st,stm32mp1-iwdg";
+				reg = <0x44020000 0x400>;
+				interrupts = <GIC_SPI 3 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_BUS_IWDG2>, <&rcc LSI_CK>;
+				clock-names = "pclk", "lsi";
+				resets = <&rcc IWDG2_SYS_R>;
+				access-controllers = <&rifsc STM32MP25_RIFSC_IWDG2_ID>;
+				status = "disabled";
+			};
+
+			i2c8: i2c@46040000 {
+				compatible = "st,stm32mp25-i2c";
+				reg = <0x46040000 0x400>;
+				clocks = <&rcc CK_KER_I2C8>;
+				resets = <&rcc I2C8_R>;
+				#address-cells = <1>;
+				#size-cells = <0>;
+				i2c-analog-filter;
+				access-controllers = <&rifsc STM32MP25_RIFSC_I2C8_ID>;
+				status = "disabled";
+			};
+
+			lptimer3: timer@46050000 {
+				compatible = "st,stm32mp25-lptimer";
+				reg = <0x46050000 0x400>;
+				interrupts = <GIC_SPI 216 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_KER_LPTIM3>;
+				clock-names = "mux";
+				#address-cells = <1>;
+				#size-cells = <0>;
+				access-controllers = <&rifsc STM32MP25_RIFSC_LPTIM3_ID>;
+				status = "disabled";
+
+				counter {
+					compatible = "st,stm32mp25-lptimer-counter";
+					status = "disabled";
+				};
+
+				pwm {
+					compatible = "st,stm32mp25-pwm-lp";
+					#pwm-cells = <3>;
+					status = "disabled";
+				};
+
+				timer {
+					compatible = "st,stm32mp25-lptimer-timer";
+					status = "disabled";
+				};
+
+				trigger@2 {
+					compatible = "st,stm32mp25-lptimer-trigger";
+					reg = <2>;
+					status = "disabled";
+				};
+			};
+
+			lptimer4: timer@46060000 {
+				compatible = "st,stm32mp25-lptimer";
+				reg = <0x46060000 0x400>;
+				interrupts = <GIC_SPI 217 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_KER_LPTIM4>;
+				clock-names = "mux";
+				#address-cells = <1>;
+				#size-cells = <0>;
+				access-controllers = <&rifsc STM32MP25_RIFSC_LPTIM4_ID>;
+				status = "disabled";
+
+				counter {
+					compatible = "st,stm32mp25-lptimer-counter";
+					status = "disabled";
+				};
+
+				pwm {
+					compatible = "st,stm32mp25-pwm-lp";
+					#pwm-cells = <3>;
+					status = "disabled";
+				};
+
+				timer {
+					compatible = "st,stm32mp25-lptimer-timer";
+					status = "disabled";
+				};
+
+				trigger@3 {
+					compatible = "st,stm32mp25-lptimer-trigger";
+					reg = <3>;
+					status = "disabled";
+				};
+			};
+
+			lptimer5: timer@46070000 {
+				compatible = "st,stm32mp25-lptimer";
+				reg = <0x46070000 0x400>;
+				interrupts = <GIC_SPI 218 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_KER_LPTIM5>;
+				clock-names = "mux";
+				#address-cells = <1>;
+				#size-cells = <0>;
+				access-controllers = <&rifsc STM32MP25_RIFSC_LPTIM5_ID>;
+				status = "disabled";
+
+				counter {
+					compatible = "st,stm32mp25-lptimer-counter";
+					status = "disabled";
+				};
+
+				pwm {
+					compatible = "st,stm32mp25-pwm-lp";
+					#pwm-cells = <3>;
+					status = "disabled";
+				};
+
+				timer {
+					compatible = "st,stm32mp25-lptimer-timer";
+					status = "disabled";
+				};
+
+				trigger@4 {
+					compatible = "st,stm32mp25-lptimer-trigger";
+					reg = <4>;
+					status = "disabled";
+				};
+			};
+
+			ltdc: display-controller@48010000 {
+				compatible = "st,stm32-ltdc";
+				reg = <0x48010000 0x400>;
+				interrupts = <GIC_SPI 160 IRQ_TYPE_LEVEL_HIGH>,
+					     <GIC_SPI 161 IRQ_TYPE_LEVEL_HIGH>;
+				clocks = <&rcc CK_BUS_LTDC>, <&rcc CK_KER_LTDC>;
+				clock-names = "bus", "lcd";
+				resets = <&rcc LTDC_R>;
+				status = "disabled";
+				access-controllers = <&rifsc STM32MP25_RIFSC_LTDC_CMN_ID>;
+				access-controller-names = "cmn";
+
+				l1l2 {
+					access-controllers = <&rifsc STM32MP25_RIFSC_LTDC_L0L1_ID>;
+					access-controller-names = "l1l2";
+				};
+				l3 {
+					access-controllers = <&rifsc STM32MP25_RIFSC_LTDC_L2_ID>;
+					access-controller-names = "l3";
+				};
+				rot {
+					access-controllers = <&rifsc STM32MP25_RIFSC_LTDC_ROT_ID>;
+					access-controller-names = "rot";
+				};
+			};
+		};
+
+		iac: iac@42090000 {
+			compatible = "st,stm32mp25-iac";
+			reg = <0x42090000 0x400>;
+			interrupts = <GIC_SPI 246 IRQ_TYPE_LEVEL_HIGH>;
+		};
+
+		risaf1: risaf@420a0000 {
+			compatible = "st,stm32mp25-risaf";
+			reg = <0x420a0000 0x1000>;
+			clocks = <&rcc CK_BUS_BKPSRAM>;
+			st,mem-map = <0x0 0x42000000 0x0 0x2000>;
+			#access-controller-cells = <1>;
+		};
+
+		risaf2: risaf@420b0000 {
+			compatible = "st,stm32mp25-risaf";
+			reg = <0x420b0000 0x1000>;
+			clocks = <&rcc CK_KER_OSPI1>;
+			st,mem-map = <0x0 0x60000000 0x0 0x10000000>;
+			#access-controller-cells = <1>;
+			status = "disabled";
+		};
+
+		risaf4: risaf@420d0000 {
+			compatible = "st,stm32mp25-risaf-enc";
+			reg = <0x420d0000 0x1000>;
+			clocks = <&rcc CK_BUS_RISAF4>;
+			st,mem-map = <0x0 0x80000000 0x1 0x00000000>;
+			#access-controller-cells = <1>;
+		};
+
+		risaf5: risaf@420e0000 {
+			compatible = "st,stm32mp25-risaf";
+			reg = <0x420e0000 0x1000>;
+			clocks = <&rcc CK_BUS_PCIE>;
+			st,mem-map = <0x0 0x10000000 0x0 0x10000000>;
+			#access-controller-cells = <1>;
+			status = "disabled";
+		};
+
+		risab1: risab@420f0000 {
+			compatible = "st,stm32mp25-risab";
+			reg = <0x420f0000 0x1000>;
+			clocks = <&rcc CK_ICN_LS_MCU>;
+			st,mem-map = <0xa000000 0x20000>;
+			#access-controller-cells = <1>;
+		};
+
+		risab2: risab@42100000 {
+			compatible = "st,stm32mp25-risab";
+			reg = <0x42100000 0x1000>;
+			clocks = <&rcc CK_ICN_LS_MCU>;
+			st,mem-map = <0xa020000 0x20000>;
+			#access-controller-cells = <1>;
+		};
+
+		risab3: risab@42110000 {
+			compatible = "st,stm32mp25-risab";
+			reg = <0x42110000 0x1000>;
+			clocks = <&rcc CK_ICN_LS_MCU>;
+			st,mem-map = <0xa040000 0x20000>;
+			#access-controller-cells = <1>;
+		};
+
+		risab4: risab@42120000 {
+			compatible = "st,stm32mp25-risab";
+			reg = <0x42120000 0x1000>;
+			clocks = <&rcc CK_ICN_LS_MCU>;
+			st,mem-map = <0xa060000 0x20000>;
+			#access-controller-cells = <1>;
+		};
+
+		risab5: risab@42130000 {
+			compatible = "st,stm32mp25-risab";
+			reg = <0x42130000 0x1000>;
+			clocks = <&rcc CK_ICN_LS_MCU>;
+			st,mem-map = <0xa080000 0x20000>;
+			#access-controller-cells = <1>;
+		};
+
+		risab6: risab@42140000 {
+			compatible = "st,stm32mp25-risab";
+			reg = <0x42140000 0x1000>;
+			clocks = <&rcc CK_ICN_LS_MCU>;
+			st,mem-map = <0xa0a0000 0x20000>;
+			#access-controller-cells = <1>;
+			status = "disabled";
+		};
+
+		bsec: efuse@44000000 {
+			compatible = "st,stm32mp25-bsec";
+			reg = <0x44000000 0x1000>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			part_number_otp@24 {
+				reg = <0x24 0x4>;
+			};
+
+			package_otp@1e8 {
+				reg = <0x1e8 0x1>;
+			};
+
+			hconf1_otp: otp124@1f0 {
+				reg = <0x1f0 0x4>;
+			};
+
+			pkh_otp: otp144@240 {
+				reg = <0x240 0x20>;
+			};
+
+			oem_fip_enc_key: otp260@410 {
+				reg = <0x410 0x20>;
+				st,non-secure-otp-provisioning;
+			};
+
+			oem_enc_key_2: otp360@5a0 {
+				reg = <0x5a0 0x10>;
+				st,non-secure-otp-provisioning;
+			};
+
+			oem_enc_key_1: otp364@5b0 {
+				reg = <0x5b0 0x10>;
+				st,non-secure-otp-provisioning;
+			};
+		};
+
+		vrefbuf: vrefbuf@44060000 {
+			compatible = "st,stm32mp25-vrefbuf";
+			reg = <0x44060000 0x8>;
+			regulator-name = "vrefbuf";
+			regulator-min-microvolt = <1210000>;
+			regulator-max-microvolt = <1500000>;
+			clocks = <&rcc CK_BUS_VREF>;
+			vdda-supply = <&vdda18adc>;
+			status = "disabled";
+		};
+
+		serc: serc@44080000 {
+			compatible = "st,stm32mp25-serc";
+			reg = <0x44080000 0x1000>;
+			interrupts = <GIC_SPI 240 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&rcc CK_BUS_SERC>;
+		};
+
+		rcc: rcc@44200000 {
+			compatible = "st,stm32mp25-rcc", "syscon";
+			reg = <0x44200000 0x10000>;
+			interrupts = <GIC_SPI 259 IRQ_TYPE_LEVEL_HIGH>;
+
+			#clock-cells = <1>;
+			#reset-cells = <1>;
+			clocks = <&clk_hse>, <&clk_hsi>, <&clk_lse>,
+				 <&clk_lsi>, <&clk_msi>, <&clk_i2sin>;
+			clock-names = "clk-hse", "clk-hsi", "clk-lse",
+				      "clk-lsi", "clk-msi", "clk-i2sin";
+
+			hsi_calibration: hsi-calibration {
+				compatible = "st,hsi-cal";
+				st,cal_hsi_dev = <31>;
+				st,cal_hsi_ref = <1953>;
+				status = "disabled";
+			};
+
+			msi_calibration: msi-calibration {
+				compatible = "st,msi-cal";
+				status = "disabled";
+			};
+		};
+
+		pwr: pwr@44210000 {
+			compatible = "st,stm32mp25-pwr";
+			reg = <0x44210000 0x400>;
+			wakeup-parent = <&exti1>;
+			interrupts = <GIC_SPI 226 IRQ_TYPE_LEVEL_HIGH>;
+			wakeup-gpios = <0>, <0>, <0>, <0>, <0>, <0>;
+			status = "disabled";
+
+			vdd33ucpd: vdd33ucpd {
+				compatible = "st,stm32mp25-pwr-regu";
+				regulator-name = "vdd33ucpd";
+				status = "disabled";
+			};
+
+			vdda18adc: vdda18adc {
+				compatible = "st,stm32mp25-pwr-regu";
+				regulator-name = "vdda18adc";
+				status = "disabled";
+			};
+
+			vddgpu: vddgpu {
+				compatible = "st,stm32mp25-pwr-regu";
+				regulator-name = "vddgpu";
+				status = "disabled";
+			};
+
+			vddio1: vddio1 {
+				compatible = "st,stm32mp25-pwr-regu";
+				regulator-name = "vddio1";
+				status = "disabled";
+			};
+
+			vddio2: vddio2 {
+				compatible = "st,stm32mp25-pwr-regu";
+				regulator-name = "vddio2";
+				status = "disabled";
+			};
+
+			vddio3: vddio3 {
+				compatible = "st,stm32mp25-pwr-regu";
+				regulator-name = "vddio3";
+				status = "disabled";
+			};
+
+			vddio4: vddio4 {
+				compatible = "st,stm32mp25-pwr-regu";
+				regulator-name = "vddio4";
+				status = "disabled";
+			};
+
+			vddio: vddio {
+				compatible = "st,stm32mp25-pwr-regu";
+				regulator-name = "vddio";
+				regulator-always-on;
+				status = "disabled";
+			};
+		};
+
+		exti1: interrupt-controller@44220000 {
+			compatible = "st,stm32mp1-exti", "syscon";
+			interrupt-controller;
+			#interrupt-cells = <2>;
+			#address-cells = <0>;
+			reg = <0x44220000 0x400>;
+
+			exti-interrupt-map {
+				#address-cells = <0>;
+				#interrupt-cells = <2>;
+				interrupt-map-mask = <0xffffffff 0>;
+				interrupt-map =
+					<0  0 &intc 0 GIC_SPI 268 IRQ_TYPE_LEVEL_HIGH>,
+					<1  0 &intc 0 GIC_SPI 269 IRQ_TYPE_LEVEL_HIGH>,
+					<2  0 &intc 0 GIC_SPI 270 IRQ_TYPE_LEVEL_HIGH>,
+					<3  0 &intc 0 GIC_SPI 271 IRQ_TYPE_LEVEL_HIGH>,
+					<4  0 &intc 0 GIC_SPI 272 IRQ_TYPE_LEVEL_HIGH>,
+					<5  0 &intc 0 GIC_SPI 273 IRQ_TYPE_LEVEL_HIGH>,
+					<6  0 &intc 0 GIC_SPI 274 IRQ_TYPE_LEVEL_HIGH>,
+					<7  0 &intc 0 GIC_SPI 275 IRQ_TYPE_LEVEL_HIGH>,
+					<8  0 &intc 0 GIC_SPI 276 IRQ_TYPE_LEVEL_HIGH>,
+					<9  0 &intc 0 GIC_SPI 277 IRQ_TYPE_LEVEL_HIGH>,
+					<10 0 &intc 0 GIC_SPI 278 IRQ_TYPE_LEVEL_HIGH>,
+					<11 0 &intc 0 GIC_SPI 279 IRQ_TYPE_LEVEL_HIGH>,
+					<12 0 &intc 0 GIC_SPI 280 IRQ_TYPE_LEVEL_HIGH>,
+					<13 0 &intc 0 GIC_SPI 281 IRQ_TYPE_LEVEL_HIGH>,
+					<14 0 &intc 0 GIC_SPI 282 IRQ_TYPE_LEVEL_HIGH>,
+					<15 0 &intc 0 GIC_SPI 283 IRQ_TYPE_LEVEL_HIGH>,
+					<16 0 &intc 0 GIC_SPI 0   IRQ_TYPE_LEVEL_HIGH>,
+					<17 0 &intc 0 GIC_SPI 1   IRQ_TYPE_LEVEL_HIGH>,
+					<18 0 &intc 0 GIC_SPI 260 IRQ_TYPE_LEVEL_HIGH>,
+					<19 0 &intc 0 GIC_SPI 259 IRQ_TYPE_LEVEL_HIGH>,
+					<21 0 &intc 0 GIC_SPI 108 IRQ_TYPE_LEVEL_HIGH>,
+					<22 0 &intc 0 GIC_SPI 110 IRQ_TYPE_LEVEL_HIGH>,
+					<23 0 &intc 0 GIC_SPI 137 IRQ_TYPE_LEVEL_HIGH>,
+					<24 0 &intc 0 GIC_SPI 168 IRQ_TYPE_LEVEL_HIGH>,
+					<25 0 &intc 0 GIC_SPI 181 IRQ_TYPE_LEVEL_HIGH>,
+					<26 0 &intc 0 GIC_SPI 114 IRQ_TYPE_LEVEL_HIGH>,
+					<27 0 &intc 0 GIC_SPI 115 IRQ_TYPE_LEVEL_HIGH>,
+					<28 0 &intc 0 GIC_SPI 116 IRQ_TYPE_LEVEL_HIGH>,
+					<29 0 &intc 0 GIC_SPI 136 IRQ_TYPE_LEVEL_HIGH>,
+					<30 0 &intc 0 GIC_SPI 126 IRQ_TYPE_LEVEL_HIGH>,
+					<31 0 &intc 0 GIC_SPI 127 IRQ_TYPE_LEVEL_HIGH>,
+					<32 0 &intc 0 GIC_SPI 148 IRQ_TYPE_LEVEL_HIGH>,
+					<33 0 &intc 0 GIC_SPI 149 IRQ_TYPE_LEVEL_HIGH>,
+					<34 0 &intc 0 GIC_SPI 150 IRQ_TYPE_LEVEL_HIGH>,
+					<36 0 &intc 0 GIC_SPI 112 IRQ_TYPE_LEVEL_HIGH>,
+					<37 0 &intc 0 GIC_SPI 113 IRQ_TYPE_LEVEL_HIGH>,
+					<38 0 &intc 0 GIC_SPI 125 IRQ_TYPE_LEVEL_HIGH>,
+					<39 0 &intc 0 GIC_SPI 152 IRQ_TYPE_LEVEL_HIGH>,
+					<40 0 &intc 0 GIC_SPI 153 IRQ_TYPE_LEVEL_HIGH>,
+					<41 0 &intc 0 GIC_SPI 154 IRQ_TYPE_LEVEL_HIGH>,
+					<42 0 &intc 0 GIC_SPI 155 IRQ_TYPE_LEVEL_HIGH>,
+					<43 0 &intc 0 GIC_SPI 169 IRQ_TYPE_LEVEL_HIGH>,
+					<44 0 &intc 0 GIC_SPI 182 IRQ_TYPE_LEVEL_HIGH>,
+					<45 0 &intc 0 GIC_SPI 209 IRQ_TYPE_LEVEL_HIGH>,
+					<46 0 &intc 0 GIC_SPI 229 IRQ_TYPE_LEVEL_HIGH>,
+					<47 0 &intc 0 GIC_SPI 166 IRQ_TYPE_LEVEL_HIGH>,
+					<48 0 &intc 0 GIC_SPI 215 IRQ_TYPE_LEVEL_HIGH>,
+					<49 0 &intc 0 GIC_SPI 208 IRQ_TYPE_LEVEL_HIGH>,
+					<50 0 &intc 0 GIC_SPI 210 IRQ_TYPE_LEVEL_HIGH>,
+					<59 0 &intc 0 GIC_SPI 171 IRQ_TYPE_LEVEL_HIGH>,
+					//	<59 0 &intc 0 GIC_SPI 172 IRQ_TYPE_LEVEL_HIGH>,
+					<61 0 &intc 0 GIC_SPI 173 IRQ_TYPE_LEVEL_HIGH>,
+					//	<61 0 &intc 0 GIC_SPI 174 IRQ_TYPE_LEVEL_HIGH>,
+					<64 0 &intc 0 GIC_SPI 220 IRQ_TYPE_LEVEL_HIGH>,
+					<67 0 &intc 0 GIC_SPI 10  IRQ_TYPE_LEVEL_HIGH>,
+					<68 0 &intc 0 GIC_SPI 131 IRQ_TYPE_LEVEL_HIGH>,
+					<70 0 &intc 0 GIC_SPI 134 IRQ_TYPE_LEVEL_HIGH>,
+					<72 0 &intc 0 GIC_SPI 224 IRQ_TYPE_LEVEL_HIGH>,
+					<73 0 &intc 0 GIC_SPI 202 IRQ_TYPE_LEVEL_HIGH>,
+					<74 0 &intc 0 GIC_SPI 109 IRQ_TYPE_LEVEL_HIGH>,
+					<75 0 &intc 0 GIC_SPI 111 IRQ_TYPE_LEVEL_HIGH>,
+					<76 0 &intc 0 GIC_SPI 138 IRQ_TYPE_LEVEL_HIGH>,
+					<77 0 &intc 0 GIC_SPI 253 IRQ_TYPE_LEVEL_HIGH>,
+					<78 0 &intc 0 GIC_SPI 254 IRQ_TYPE_LEVEL_HIGH>,
+					<79 0 &intc 0 GIC_SPI 255 IRQ_TYPE_LEVEL_HIGH>,
+					<83 0 &intc 0 GIC_SPI 257 IRQ_TYPE_LEVEL_HIGH>,
+					<84 0 &intc 0 GIC_SPI 258 IRQ_TYPE_LEVEL_HIGH>;
+			};
+		};
+
+		syscfg: syscon@44230000 {
+			reg = <0x44230000 0x10000>;
+			status = "disabled";
+		};
+
+		pinctrl: pinctrl@44240000 {
+			#address-cells = <1>;
+			#size-cells = <1>;
+			compatible = "st,stm32mp257-pinctrl";
+			ranges = <0 0x44240000 0xa0400>;
+
+			gpioa: gpio@44240000 {
+				gpio-controller;
+				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
+				#access-controller-cells = <1>;
+				reg = <0x0 0x400>;
+				clocks = <&rcc CK_BUS_GPIOA>;
+				st,bank-name = "GPIOA";
+				status = "disabled";
+			};
+
+			gpiob: gpio@44250000 {
+				gpio-controller;
+				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
+				#access-controller-cells = <1>;
+				reg = <0x10000 0x400>;
+				clocks = <&rcc CK_BUS_GPIOB>;
+				st,bank-name = "GPIOB";
+				status = "disabled";
+			};
+
+			gpioc: gpio@44260000 {
+				gpio-controller;
+				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
+				#access-controller-cells = <1>;
+				reg = <0x20000 0x400>;
+				clocks = <&rcc CK_BUS_GPIOC>;
+				st,bank-name = "GPIOC";
+				status = "disabled";
+			};
+
+			gpiod: gpio@44270000 {
+				gpio-controller;
+				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
+				#access-controller-cells = <1>;
+				reg = <0x30000 0x400>;
+				clocks = <&rcc CK_BUS_GPIOD>;
+				st,bank-name = "GPIOD";
+				status = "disabled";
+			};
+
+			gpioe: gpio@44280000 {
+				gpio-controller;
+				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
+				#access-controller-cells = <1>;
+				reg = <0x40000 0x400>;
+				clocks = <&rcc CK_BUS_GPIOE>;
+				st,bank-name = "GPIOE";
+				status = "disabled";
+			};
+
+			gpiof: gpio@44290000 {
+				gpio-controller;
+				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
+				#access-controller-cells = <1>;
+				reg = <0x50000 0x400>;
+				clocks = <&rcc CK_BUS_GPIOF>;
+				st,bank-name = "GPIOF";
+				status = "disabled";
+			};
+
+			gpiog: gpio@442a0000 {
+				gpio-controller;
+				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
+				#access-controller-cells = <1>;
+				reg = <0x60000 0x400>;
+				clocks = <&rcc CK_BUS_GPIOG>;
+				st,bank-name = "GPIOG";
+				status = "disabled";
+			};
+
+			gpioh: gpio@442b0000 {
+				gpio-controller;
+				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
+				#access-controller-cells = <1>;
+				reg = <0x70000 0x400>;
+				clocks = <&rcc CK_BUS_GPIOH>;
+				st,bank-name = "GPIOH";
+				status = "disabled";
+			};
+
+			gpioi: gpio@442c0000 {
+				gpio-controller;
+				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
+				#access-controller-cells = <1>;
+				reg = <0x80000 0x400>;
+				clocks = <&rcc CK_BUS_GPIOI>;
+				st,bank-name = "GPIOI";
+				status = "disabled";
+			};
+
+			gpioj: gpio@442d0000 {
+				gpio-controller;
+				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
+				#access-controller-cells = <1>;
+				reg = <0x90000 0x400>;
+				clocks = <&rcc CK_BUS_GPIOJ>;
+				st,bank-name = "GPIOJ";
+				status = "disabled";
+			};
+
+			gpiok: gpio@442e0000 {
+				gpio-controller;
+				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
+				#access-controller-cells = <1>;
+				reg = <0xa0000 0x400>;
+				clocks = <&rcc CK_BUS_GPIOK>;
+				st,bank-name = "GPIOK";
+				status = "disabled";
+			};
+		};
+
+		rtc: rtc@46000000 {
+			compatible = "st,stm32mp25-rtc";
+			reg = <0x46000000 0x400>;
+			clocks = <&rcc CK_BUS_RTC>, <&rcc RTC_CK>;
+			clock-names = "pclk", "rtc_ck";
+			wakeup-source;
+			wakeup-parent = <&exti2>;
+			interrupts = <GIC_SPI 15 IRQ_TYPE_LEVEL_HIGH>;
+		};
+
+		tamp: tamp@46010000 {
+			compatible = "st,stm32mp25-tamp";
+			reg = <0x46010000 0x400>;
+			clocks = <&rcc CK_BUS_RTC>;
+			interrupts = <GIC_SPI 14 IRQ_TYPE_LEVEL_HIGH>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+			ranges;
+			st,backup-zones = <24 24 24 24 12 12 8>;
+
+			nvram: nvram@46010100 {
+				compatible = "st,stm32mp25-tamp-nvram";
+				#address-cells = <1>;
+				#size-cells = <1>;
+				reg = <0x46010100 0x200>;
+
+				boot_mode: tamp-bkp@180 {
+					reg = <0x180 0x4>;
+				};
+			};
+
+			reboot_mode: reboot-mode {
+				compatible = "nvmem-reboot-mode";
+				nvmem-cells = <&boot_mode>;
+				nvmem-cell-names = "reboot-mode";
+				mode-normal = <0x00>;
+				mode-fastboot = <0x01>;
+				mode-recovery = <0x02>;
+				mode-stm32cubeprogrammer = <0x03>;
+				mode-ums_mmc0 = <0x10>;
+				mode-ums_mmc1 = <0x11>;
+				mode-ums_mmc2 = <0x12>;
+				mode-romcode_serial = <0xff>;
+			};
+		};
+
+		pinctrl_z: pinctrl-z@46200000 {
+			#address-cells = <1>;
+			#size-cells = <1>;
+			compatible = "st,stm32mp257-z-pinctrl";
+			ranges = <0 0x46200000 0x400>;
+
+			gpioz: gpio@46200000 {
+				gpio-controller;
+				#gpio-cells = <2>;
+				interrupt-controller;
+				#interrupt-cells = <2>;
+				#access-controller-cells = <1>;
+				reg = <0 0x400>;
+				clocks = <&rcc CK_BUS_GPIOZ>;
+				st,bank-name = "GPIOZ";
+				st,bank-ioport = <11>;
+				status = "disabled";
+			};
+		};
+
+		exti2: interrupt-controller@46230000 {
+			compatible = "st,stm32mp1-exti", "syscon";
+			interrupt-controller;
+			#interrupt-cells = <2>;
+			#address-cells = <0>;
+			reg = <0x46230000 0x400>;
+
+			exti-interrupt-map {
+				#address-cells = <0>;
+				#interrupt-cells = <2>;
+				interrupt-map-mask = <0xffffffff 0>;
+				interrupt-map =
+					<16 0 &intc 0 GIC_SPI 12  IRQ_TYPE_LEVEL_HIGH>,
+					<17 0 &intc 0 GIC_SPI 13  IRQ_TYPE_LEVEL_HIGH>,
+					<21 0 &intc 0 GIC_SPI 14  IRQ_TYPE_LEVEL_HIGH>,
+					<22 0 &intc 0 GIC_SPI 15  IRQ_TYPE_LEVEL_HIGH>,
+					<25 0 &intc 0 GIC_SPI 212 IRQ_TYPE_LEVEL_HIGH>,
+					<26 0 &intc 0 GIC_SPI 151 IRQ_TYPE_LEVEL_HIGH>,
+					<27 0 &intc 0 GIC_SPI 156 IRQ_TYPE_LEVEL_HIGH>,
+					<29 0 &intc 0 GIC_SPI 216 IRQ_TYPE_LEVEL_HIGH>,
+					<30 0 &intc 0 GIC_SPI 217 IRQ_TYPE_LEVEL_HIGH>,
+					<31 0 &intc 0 GIC_SPI 218 IRQ_TYPE_LEVEL_HIGH>,
+					<33 0 &intc 0 GIC_SPI 207 IRQ_TYPE_LEVEL_HIGH>,
+					<34 0 &intc 0 GIC_SPI 175 IRQ_TYPE_LEVEL_HIGH>,
+					//	<34 0 &intc 0 GIC_SPI 176 IRQ_TYPE_LEVEL_HIGH>,
+					<37 0 &intc 0 GIC_SPI 177 IRQ_TYPE_LEVEL_HIGH>,
+					//	<37 0 &intc 0 GIC_SPI 178 IRQ_TYPE_LEVEL_HIGH>,
+					<40 0 &intc 0 GIC_SPI 199 IRQ_TYPE_LEVEL_HIGH>,
+					<43 0 &intc 0 GIC_SPI 200 IRQ_TYPE_LEVEL_HIGH>,
+					<46 0 &intc 0 GIC_SPI 11  IRQ_TYPE_LEVEL_HIGH>,
+					<48 0 &intc 0 GIC_SPI 5   IRQ_TYPE_LEVEL_HIGH>,
+					<49 0 &intc 0 GIC_SPI 4   IRQ_TYPE_LEVEL_HIGH>,
+					<50 0 &intc 0 GIC_SPI 6   IRQ_TYPE_LEVEL_HIGH>,
+					<51 0 &intc 0 GIC_SPI 7   IRQ_TYPE_LEVEL_HIGH>,
+					<52 0 &intc 0 GIC_SPI 2   IRQ_TYPE_LEVEL_HIGH>,
+					<53 0 &intc 0 GIC_SPI 3   IRQ_TYPE_LEVEL_HIGH>,
+					<61 0 &intc 0 GIC_SPI 221 IRQ_TYPE_LEVEL_HIGH>,
+					<62 0 &intc 0 GIC_SPI 246 IRQ_TYPE_LEVEL_HIGH>,
+					<64 0 &intc 0 GIC_SPI 247 IRQ_TYPE_LEVEL_HIGH>,
+					<65 0 &intc 0 GIC_SPI 248 IRQ_TYPE_LEVEL_HIGH>,
+					<66 0 &intc 0 GIC_SPI 249 IRQ_TYPE_LEVEL_HIGH>,
+					<67 0 &intc 0 GIC_SPI 256 IRQ_TYPE_LEVEL_HIGH>,
+					<70 0 &intc 0 GIC_SPI 213 IRQ_TYPE_LEVEL_HIGH>;
+			};
+		};
+
+		hsem: hwspinlock@46240000 {
+			compatible = "st,stm32mp25-hsem";
+			reg = <0x46240000 0x400>;
+			interrupts = <GIC_SPI 200 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&rcc CK_BUS_HSEM>;
+		};
+
+		ipcc2: mailbox@46250000 {
+			compatible = "st,stm32mp25-ipcc";
+			reg = <0x46250000 0x400>;
+			clocks = <&rcc CK_BUS_IPCC2>;
+		};
+
+		stgenc: stgen@48080000 {
+			compatible = "st,stm32mp25-stgen";
+			reg = <0x48080000 0x1000>;
+			clocks = <&rcc CK_BUS_STGEN>, <&rcc CK_KER_STGEN>;
+			clock-names = "bus", "tsgen_clk";
+			st,tsgen-clk-source = <&rcc HSE_CK>;
+		};
+
+		fmc: memory-controller@48200000 {
+			#address-cells = <2>;
+			#size-cells = <1>;
+			compatible = "st,stm32mp25-fmc2-ebi";
+			reg = <0x48200000 0x400>;
+			clocks = <&rcc CK_KER_FMC>;
+			resets = <&rcc FMC_R>;
+			status = "disabled";
+
+			ranges = <0 0 0x60000000 0x04000000>, /* EBI CS 1 */
+				 <1 0 0x64000000 0x04000000>, /* EBI CS 2 */
+				 <2 0 0x68000000 0x04000000>, /* EBI CS 3 */
+				 <3 0 0x6c000000 0x04000000>, /* EBI CS 4 */
+				 <4 0 0x80000000 0x10000000>; /* NAND */
+		};
+	};
+};

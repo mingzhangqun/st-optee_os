@@ -9,6 +9,7 @@
 #include <keep.h>
 #include <kernel/abort.h>
 #include <kernel/stmm_sp.h>
+#include <kernel/tee_ta_manager.h>
 #include <kernel/thread_private.h>
 #include <kernel/user_mode_ctx.h>
 #include <mempool.h>
@@ -334,7 +335,9 @@ static TEE_Result load_stmm(struct stmm_ctx *spc)
 TEE_Result stmm_init_session(const TEE_UUID *uuid, struct tee_ta_session *sess)
 {
 	struct stmm_ctx *spc = NULL;
-	TEE_Result res = TEE_SUCCESS;
+
+	/* Caller is expected to hold tee_ta_mutex for safe changes in @sess */
+	assert(mutex_is_locked(&tee_ta_mutex));
 
 	if (memcmp(uuid, &stmm_uuid, sizeof(*uuid)))
 		return TEE_ERROR_ITEM_NOT_FOUND;
@@ -343,12 +346,18 @@ TEE_Result stmm_init_session(const TEE_UUID *uuid, struct tee_ta_session *sess)
 	if (!spc)
 		return TEE_ERROR_OUT_OF_MEMORY;
 
-	spc->is_initializing = true;
+	spc->ta_ctx.is_initializing = true;
 
-	mutex_lock(&tee_ta_mutex);
 	sess->ts_sess.ctx = &spc->ta_ctx.ts_ctx;
 	sess->ts_sess.handle_scall = sess->ts_sess.ctx->ops->handle_scall;
-	mutex_unlock(&tee_ta_mutex);
+
+	return TEE_SUCCESS;
+}
+
+TEE_Result stmm_complete_session(struct tee_ta_session *sess)
+{
+	struct stmm_ctx *spc = to_stmm_ctx(sess->ts_sess.ctx);
+	TEE_Result res = TEE_SUCCESS;
 
 	ts_push_current_session(&sess->ts_sess);
 	res = load_stmm(spc);
@@ -362,7 +371,7 @@ TEE_Result stmm_init_session(const TEE_UUID *uuid, struct tee_ta_session *sess)
 	}
 
 	mutex_lock(&tee_ta_mutex);
-	spc->is_initializing = false;
+	spc->ta_ctx.is_initializing = false;
 	TAILQ_INSERT_TAIL(&tee_ctxes, &spc->ta_ctx, link);
 	mutex_unlock(&tee_ta_mutex);
 
@@ -381,7 +390,7 @@ static TEE_Result stmm_enter_open_session(struct ts_session *s)
 	if (ta_sess->param->types != exp_pt)
 		return TEE_ERROR_BAD_PARAMETERS;
 
-	if (spc->is_initializing) {
+	if (spc->ta_ctx.is_initializing) {
 		/* StMM is initialized in stmm_init_session() */
 		ta_sess->err_origin = TEE_ORIGIN_TEE;
 		return TEE_ERROR_BAD_STATE;
@@ -663,7 +672,7 @@ static TEE_Result sec_storage_obj_read(unsigned long storage_id, char *obj_id,
 	sess = ts_get_current_session();
 
 	res = tee_pobj_get(&sess->ctx->uuid, obj_id, obj_id_len, flags,
-			   false, fops, &po);
+			   TEE_POBJ_USAGE_OPEN, fops, &po);
 	if (res != TEE_SUCCESS)
 		return res;
 
@@ -714,7 +723,7 @@ static TEE_Result sec_storage_obj_write(unsigned long storage_id, char *obj_id,
 	sess = ts_get_current_session();
 
 	res = tee_pobj_get(&sess->ctx->uuid, obj_id, obj_id_len, flags,
-			   false, fops, &po);
+			   TEE_POBJ_USAGE_OPEN, fops, &po);
 	if (res != TEE_SUCCESS)
 		return res;
 

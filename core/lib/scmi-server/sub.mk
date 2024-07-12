@@ -7,19 +7,30 @@
 # The toolchain build directive must also match the list of
 # embedded modules.
 
+ifeq ($(_CFG_SCP_FIRMWARE_IN_TREE),y)
+scpfw-path = SCP-firmware
+scpfw-src-path = core/lib/scmi-server/SCP-firmware
+else
 scpfw-path = $(CFG_SCP_FIRMWARE)
+scpfw-src-path = $(CFG_SCP_FIRMWARE)
+endif
+
 scpfw-product = $(CFG_SCMI_SCPFW_PRODUCT)
 scpfw-out-path := $(out-dir)/$(libdir)
 
 # This script was validated against SCP-firmware 2.11.0 development branch,
 # from commit f1d894921d76 ("product/optee-fvp: Add new OPTEE FVP product").
 scpfw-integ-version-maj = 2
-scpfw-integ-version-min = 11
+scpfw-integ-version-min = 13
 scpfw-integ-version-pat = 0
 scpfw-integ-version = $(scpfw-integ-version-maj).$(scpfw-integ-version-min).$(scpfw-integ-version-pat)
 
 srcs-y += scmi_server.c
-incdirs-y += include
+srcs-$(CFG_SCMI_SERVER_CLOCK_CONSUMER) += scmi_clock_consumer.c
+srcs-$(CFG_SCMI_SERVER_PD_CONSUMER) += scmi_pd_consumer.c
+srcs-$(CFG_SCMI_SERVER_REGULATOR_CONSUMER) += scmi_regulator_consumer.c
+srcs-$(CFG_SCMI_SERVER_RESET_CONSUMER) += scmi_reset_consumer.c
+global-incdirs-y += include
 
 # SCP-firmware cmake configuration generates header fwk_module_idx.h and
 # source files fwk_module_list.c needed for scp-firmware compilation.
@@ -27,8 +38,12 @@ scpfw-cmake-flags-y = -DSCP_FIRMWARE_SOURCE_DIR:PATH=$(scpfw-product)/fw \
 		      -DSCP_LOG_LEVEL="TRACE" \
 		      -DDISABLE_CPPCHECK=1 \
 		      -DCFG_NUM_THREADS=$(CFG_NUM_THREADS) \
-		      -DSCP_OPTEE_DIR:PATH=$(CURDIR) \
-		      -DCFG_CROSS_COMPILE=$(lastword $(CROSS_COMPILE_core))
+		      -DSCP_OPTEE_DIR:PATH=$(CURDIR)
+
+# CMake does not need to check the cross compilation toolchain since we do not
+# compile any source file with CMake, we only generate some SCP-firmware
+# files.
+scpfw-cmake-flags-y += -DCMAKE_C_COMPILER_WORKS=1
 
 ifeq ($(cmd-echo-silent),true)
 scpfw-cmake-redirect = >/dev/null
@@ -37,9 +52,9 @@ endif
 gensrcs-y += fwk_module_list
 force-gensrc-fwk_module_list := y
 produce-fwk_module_list = build/framework/src/fwk_module_list.c
-recipe-fwk_module_list = cmake -S $(scpfw-path) -B $(scpfw-out-path)/build \
+recipe-fwk_module_list = cmake -S $(scpfw-src-path) -B $(scpfw-out-path)/build \
                          $(scpfw-cmake-flags-y) --log-level=WARNING $(scpfw-cmake-redirect)
-depends-fwk_module_list = $(scpfw-path)/product/$(scpfw-product)/fw/Firmware.cmake $(conf-file)
+depends-fwk_module_list = $(scpfw-src-path)/product/$(scpfw-product)/fw/Firmware.cmake $(conf-file)
 # Include path of generated header file fwk_module_idx.h
 incdirs_ext-y += $(scpfw-out-path)/build/framework/include
 
@@ -47,14 +62,19 @@ cppflags-lib-y += -DBUILD_VERSION_MAJOR=$(scpfw-integ-version-maj) \
 		  -DBUILD_VERSION_MINOR=$(scpfw-integ-version-min) \
 		  -DBUILD_VERSION_PATCH=$(scpfw-integ-version-pat)
 
-scpfw-impl-version := $(shell git -C $(scpfw-path) describe --tags --always --dirty=-dev 2>/dev/null || \
-                      echo Unknown_$(scpfw-integ-version))
+ifeq ($(_CFG_SCP_FIRMWARE_IN_TREE),y)
+scpfw-impl-version := $(shell echo $(scpfw-integ-version)-intree-optee-os-$(TEE_IMPL_VERSION))
+else
+scpfw-impl-version := $(shell git -C $(scpfw-src-path) describe --tags --always --dirty=-dev 2>/dev/null || \
+			echo Unknown_$(scpfw-integ-version))
+endif
 cppflags-lib-y += -DBUILD_VERSION_DESCRIBE_STRING=\"$(scpfw-impl-version)\"
 
 cppflags-lib-y += -DFWK_LOG_LEVEL=$(CFG_SCPFW_LOG_LEVEL)
 ifneq ($(CFG_SCPFW_LOG_LEVEL),0)
 cppflags-lib-y += -DFMW_LOG_MINIMAL_BANNER=1
 endif
+cppflags-lib-$(CFG_SCP_ENABLE_LOG_PREFIX) += -DFWK_LOG_LEVEL_PREFIX
 
 cflags-lib-y += -Wno-cast-align \
 		-Wno-nonnull-compare \
@@ -102,11 +122,11 @@ cppflags-lib-$(CFG_SCPFW_SENSOR_EXT_ATTRIBS) += -DBUILD_HAS_SENSOR_EXT_ATTRIBS
 cppflags-lib-$(CFG_SCPFW_SENSOR_SIGNED_VALUE) += -DBUILD_HAS_SENSOR_SIGNED_VALUE
 cppflags-lib-$(CFG_SCPFW_INBAND_MSG_SUPPORT) += -DBUILD_HAS_INBAND_MSG_SUPPORT
 
-incdirs_ext-y += $(scpfw-path)/arch/none/optee/include
+scpfw-incdirs-y += $(scpfw-path)/arch/none/optee/include
 srcs-y += $(scpfw-path)/arch/none/optee/src/arch_interrupt.c
 srcs-y += $(scpfw-path)/arch/none/optee/src/arch_main.c
 
-incdirs_ext-y += $(scpfw-path)/framework/include
+scpfw-incdirs-y += $(scpfw-path)/framework/include
 srcs-y += $(scpfw-path)/framework/src/fwk_arch.c
 srcs-y += $(scpfw-path)/framework/src/fwk_dlist.c
 srcs-y += $(scpfw-path)/framework/src/fwk_id.c
@@ -147,8 +167,8 @@ srcs-$(CFG_SCPFW_NOTIFICATION) += $(scpfw-path)/framework/src/fwk_notification.c
 # $3 module parent directory relative path in scpfw tree
 # $4 module name, uppercase, relates to CFG_SCPFW_MOD_$4
 define scpfw-embed-mod
-ifneq (,$$(wildcard $(scpfw-path)/$3/$2/include/*))
-incdirs_ext-y += $(scpfw-path)/$3/$2/include
+ifneq (,$$(wildcard $(scpfw-src-path)/$3/$2/include/*))
+scpfw-incdirs-y += $(scpfw-path)/$3/$2/include
 endif
 srcs-$(CFG_SCPFW_MOD_$4) += $(scpfw-path)/$3/$2/src/mod_$1.c
 
@@ -167,6 +187,7 @@ endif
 endif
 
 cflags-lib-$(CFG_SCPFW_MOD_$4) += -DBUILD_HAS_MOD_$4
+scpfw-cmake-flags-y += -DCFG_SCPFW_MOD_$4=$(CFG_SCPFW_MOD_$4)
 endef
 
 define scpfw-embed-generic-module
@@ -207,6 +228,7 @@ $(eval $(call scpfw-embed-optee-module,console))
 $(eval $(call scpfw-embed-optee-module,mbx))
 $(eval $(call scpfw-embed-optee-module,reset))
 $(eval $(call scpfw-embed-optee-module,smt))
+$(eval $(call scpfw-embed-optee-module,voltd_regulator))
 
 srcs-$(CFG_SCPFW_MOD_CLOCK) += $(scpfw-path)/module/clock/src/clock_tree_management.c
 srcs-$(CFG_SCPFW_MOD_POWER_DOMAIN) += $(scpfw-path)/module/power_domain/src/power_domain_utils.c
@@ -215,12 +237,21 @@ srcs-$(CFG_SCPFW_MOD_SCMI_SENSOR) += $(scpfw-path)/module/scmi_sensor/src/mod_sc
 srcs-$(CFG_SCPFW_MOD_SENSOR) += $(scpfw-path)/module/sensor/src/sensor_extended.c
 
 # Architecture arch/none/optee requires optee mbx header file
-incdirs_ext-y += $(scpfw-path)/module/optee/mbx/include
+scpfw-incdirs-y += $(scpfw-path)/module/optee/mbx/include
 # Some modules require header files from module that are not embedded
 ifneq (,$(filter y, $(CFG_SCPFW_MOD_DVFS) $(CFG_SCPFW_MOD_MOCK_PSU) $(CFG_SCPFW_MOD_SCMI_PERF)))
-incdirs_ext-y += $(scpfw-path)/module/timer/include
+scpfw-incdirs-y += $(scpfw-path)/module/timer/include
 endif
-incdirs_ext-$(CFG_SCPFW_MOD_OPTEE_MBX) += $(scpfw-path)/module/msg_smt/include
-incdirs_ext-$(CFG_SCPFW_MOD_SCMI) += $(scpfw-path)/module/power_domain/include
+scpfw-incdirs-$(CFG_SCPFW_MOD_OPTEE_MBX) += $(scpfw-path)/module/msg_smt/include
+scpfw-incdirs-$(CFG_SCPFW_MOD_SCMI) += $(scpfw-path)/module/power_domain/include
 
 include core/lib/scmi-server/sub-$(CFG_SCMI_SCPFW_PRODUCT).mk
+
+# Build directive for include paths of SCP-firmware header files depends on
+# whether SCP-firmware source files are in-tree or external to OP-TEE OS
+# source tree
+ifeq ($(_CFG_SCP_FIRMWARE_IN_TREE),y)
+incdirs-y += $(scpfw-incdirs-y)
+else
+incdirs_ext-y += $(scpfw-incdirs-y)
+endif

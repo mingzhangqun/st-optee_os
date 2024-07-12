@@ -23,7 +23,6 @@
 /* VRS bit 3 is unused because the voltage is not specified */
 #define VREFBUF_CSR_VRS			GENMASK_32(5, 4)
 #define VREFBUF_CSR_VRS_SHIFT		U(4)
-#define INV_VRS(x)			((~(x)) & VREFBUF_CSR_VRS)
 
 #define VREFBUF_CSR_VRR			BIT(3)
 #define VREFBUF_CSR_HIZ			BIT(1)
@@ -40,6 +39,7 @@
  */
 struct vrefbuf_compat {
 	int voltages[VREFBUF_LEVELS_COUNT];
+	bool invert_voltages;
 };
 
 /*
@@ -49,7 +49,8 @@ struct vrefbuf_compat {
  * @regulator: Preallocated instance for the regulator
  * @compat: Compatibility data
  * @voltages_desc: Supported voltage level description
- * @voltages_level: Supplorted levels, must follow @voltages_desc
+ * @voltages_level: Supplorted levels description
+ * @voltages_start_index: start index in compat for supported levels
  */
 struct vrefbuf_regul {
 	vaddr_t base;
@@ -57,8 +58,8 @@ struct vrefbuf_regul {
 	uint64_t disable_timeout;
 	struct regulator regulator;
 	const struct vrefbuf_compat *compat;
-	struct regulator_voltages voltages_desc;
-	int supported_levels[VREFBUF_LEVELS_COUNT];
+	struct regulator_voltages_desc voltages_desc;
+	size_t voltages_start_index;
 };
 
 static const struct vrefbuf_compat stm32mp15_vrefbuf_compat = {
@@ -66,6 +67,7 @@ static const struct vrefbuf_compat stm32mp15_vrefbuf_compat = {
 		/* Matches resp. VRS = 011b, 010b, 001b, 000b */
 		1500000, 1800000, 2048000, 2500000,
 	},
+	.invert_voltages = true,
 };
 
 static const struct vrefbuf_compat stm32mp13_vrefbuf_compat = {
@@ -73,6 +75,15 @@ static const struct vrefbuf_compat stm32mp13_vrefbuf_compat = {
 		/* Matches resp. VRS = 011b, 010b, 001b, 000b */
 		1650000, 1800000, 2048000, 2500000,
 	},
+	.invert_voltages = true,
+};
+
+static const struct vrefbuf_compat stm32mp25_vrefbuf_compat = {
+	/* Matches resp. VRS = 000b, 001b */
+	.voltages = {
+		1210000, 1500000,
+	},
+	.invert_voltages = false,
 };
 
 /* Expect at most 1 instance */
@@ -168,8 +179,12 @@ static TEE_Result vrefbuf_get_voltage(struct regulator *regulator,
 	if (res)
 		return res;
 
-	index = io_read32(vr->base + VREFBUF_CSR) & VREFBUF_CSR_VRS;
-	index = INV_VRS(index) >> VREFBUF_CSR_VRS_SHIFT;
+	if (vr->compat->invert_voltages)
+		index = ((~io_read32(vr->base)) & VREFBUF_CSR_VRS) >>
+			VREFBUF_CSR_VRS_SHIFT;
+	else
+		index = (io_read32(vr->base) & VREFBUF_CSR_VRS) >>
+			VREFBUF_CSR_VRS_SHIFT;
 
 	clk_disable(vr->clock);
 
@@ -186,7 +201,10 @@ static TEE_Result vrefbuf_set_voltage(struct regulator *regulator, int level_uv)
 
 	for (i = 0 ; i < ARRAY_SIZE(vr->compat->voltages) ; i++) {
 		if (vr->compat->voltages[i] == level_uv) {
-			uint32_t val = INV_VRS(i << VREFBUF_CSR_VRS_SHIFT);
+			uint32_t val = i << VREFBUF_CSR_VRS_SHIFT;
+
+			if (vr->compat->invert_voltages)
+				val = (~val) & VREFBUF_CSR_VRS;
 
 			res = clk_enable(vr->clock);
 			if (res)
@@ -207,41 +225,47 @@ static TEE_Result vrefbuf_set_voltage(struct regulator *regulator, int level_uv)
 }
 
 static TEE_Result vrefbuf_list_voltages(struct regulator *regulator __unused,
-					struct regulator_voltages **voltages)
+					struct regulator_voltages_desc **desc,
+					const int **levels)
 {
 	struct vrefbuf_regul *vr = regulator_to_vr(regulator);
+	const int *levels_ref = vr->compat->voltages;
 
-	if (!vr->voltages_desc.type) {
-		size_t num_levels = ARRAY_SIZE(vr->compat->voltages);
-		unsigned int index_high = num_levels - 1;
-		unsigned int index_low = 0;
-		unsigned int count = 0;
-		unsigned int n = 0;
+	*desc = &vr->voltages_desc;
+	*levels = levels_ref + vr->voltages_start_index;
 
-		for (n = 0; n <= index_high; n++)
-			if (vr->compat->voltages[n] >= regulator->min_uv)
-				break;
-		if (n > index_high)
-			return TEE_ERROR_GENERIC;
-		index_low = n;
+	return TEE_SUCCESS;
+}
 
-		for (n = index_high; n >= index_low; n--)
-			if (vr->compat->voltages[n] <= regulator->max_uv)
-				break;
-		if (n < index_low)
-			return TEE_ERROR_GENERIC;
-		index_high = n;
+static TEE_Result set_voltages_desc(struct regulator *regulator)
+{
+	struct vrefbuf_regul *vr = regulator_to_vr(regulator);
+	size_t num_levels = ARRAY_SIZE(vr->compat->voltages);
+	int index_high = num_levels - 1;
+	int index_low = 0;
+	int n = 0;
 
-		count = index_high - index_low + 1;
+	vr->voltages_desc.type = VOLTAGE_TYPE_FULL_LIST;
 
-		vr->voltages_desc.type = VOLTAGE_TYPE_FULL_LIST;
-		vr->voltages_desc.num_levels = count;
-		for (n = 0; n < count; n++)
-			vr->supported_levels[n] =
-				vr->compat->voltages[index_low + n];
-	}
+	for (n = 0; n <= index_high; n++)
+		if (vr->compat->voltages[n] >= regulator->min_uv)
+			break;
+	if (n > index_high)
+		return TEE_ERROR_GENERIC;
+	index_low = n;
 
-	*voltages = &vr->voltages_desc;
+	for (n = index_high; n >= index_low; n--)
+		if (vr->compat->voltages[n] <= regulator->max_uv)
+			break;
+	if (n < index_low)
+		return TEE_ERROR_GENERIC;
+	index_high = n;
+
+	assert(index_high - index_low + 1 >= 0 && index_low >= 0);
+
+	vr->voltages_desc.type = VOLTAGE_TYPE_FULL_LIST;
+	vr->voltages_desc.num_levels = index_high - index_low + 1;
+	vr->voltages_start_index = index_low;
 
 	return TEE_SUCCESS;
 }
@@ -283,12 +307,18 @@ static TEE_Result stm32_vrefbuf_pm(enum pm_op op, unsigned int pm_hint __unused,
 
 	return TEE_SUCCESS;
 }
-DECLARE_KEEP_PAGER(stm32_vrefbuf_pm);
+DECLARE_KEEP_PAGER_PM(stm32_vrefbuf_pm);
 
 static TEE_Result stm32_vrefbuf_init(struct regulator *regulator,
 				     const void *fdt __unused,
 				     int node __unused)
 {
+	TEE_Result res = TEE_ERROR_GENERIC;
+
+	res = set_voltages_desc(regulator);
+	if (res)
+		return res;
+
 	register_pm_driver_cb(stm32_vrefbuf_pm, regulator, "stm32-vrefbuf");
 
 	return TEE_SUCCESS;
@@ -366,6 +396,10 @@ static const struct dt_device_match stm32_vrefbuf_match_table[] = {
 	{
 		.compatible = "st,stm32mp13-vrefbuf",
 		.compat_data = &stm32mp13_vrefbuf_compat
+	},
+	{
+		.compatible = "st,stm32mp25-vrefbuf",
+		.compat_data = &stm32mp25_vrefbuf_compat,
 	},
 	{ }
 };

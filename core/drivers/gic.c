@@ -6,19 +6,24 @@
 
 #include <arm.h>
 #include <assert.h>
+#include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <config.h>
 #include <compiler.h>
 #include <drivers/gic.h>
+#include <io.h>
 #include <keep.h>
 #include <kernel/dt.h>
+#include <kernel/dt_driver.h>
 #include <kernel/interrupt.h>
 #include <kernel/panic.h>
+#include <kernel/pm.h>
 #include <mm/core_memprot.h>
 #include <mm/core_mmu.h>
 #include <libfdt.h>
+#include <malloc.h>
 #include <util.h>
-#include <io.h>
 #include <trace.h>
+#include <string.h>
 
 /* Offsets from gic.gicc_base */
 #define GICC_CTLR		(0x000)
@@ -39,9 +44,11 @@
 #define GICD_ICENABLER(n)	(0x180 + (n) * 4)
 #define GICD_ISPENDR(n)		(0x200 + (n) * 4)
 #define GICD_ICPENDR(n)		(0x280 + (n) * 4)
+#define GICD_ISACTIVER(n)	(0x300 + (n) * 4)
 #define GICD_IPRIORITYR(n)	(0x400 + (n) * 4)
 #define GICD_ITARGETSR(n)	(0x800 + (n) * 4)
 #define GICD_IGROUPMODR(n)	(0xd00 + (n) * 4)
+#define GICD_ICFGR(n)		(0xc00 + (n) * 4)
 #define GICD_SGIR		(0xF00)
 
 #define GICD_CTLR_ENABLEGRP0	(1 << 0)
@@ -71,11 +78,57 @@
 #define GICC_IAR_CPU_ID_MASK	0x7
 #define GICC_IAR_CPU_ID_SHIFT	10
 
+#define GICC_SGI_IRM_BIT	40
+#define GICC_SGI_AFF1_SHIFT	16
+#define GICC_SGI_AFF2_SHIFT	32
+#define GICC_SGI_AFF3_SHIFT	48
+
+#define GICD_SGIR_SIGINTID_MASK			0xf
+#define GICD_SGIR_TO_OTHER_CPUS			0x1
+#define GICD_SGIR_TO_THIS_CPU			0x2
+#define GICD_SGIR_TARGET_LIST_FILTER_SHIFT	24
+#define GICD_SGIR_NSATT_SHIFT			15
+#define GICD_SGIR_CPU_TARGET_LIST_SHIFT		16
+
+/*
+ * Save/restore interrupts registered from the gic_op_add_it() handler
+ * during low power sequences. This is used on platforms using OP-TEE
+ * secure monitor.
+ */
+#define IT_PM_GPOUP1_BIT	BIT(0)
+#define IT_PM_ENABLE_BIT	BIT(1)
+#define IT_PM_PENDING_BIT	BIT(2)
+#define IT_PM_ACTIVE_BIT	BIT(3)
+#define IT_PM_CONFIG_MASK	GENMASK_32(1, 0)
+
+/*
+ * @it - interrupt ID/number
+ * @flags - bitflag IT_PM_*_BIT
+ * @iprio - 8bit prio from IPRIORITYR
+ * @itarget - 8bit target from ITARGETR
+ * @icfg - 2bit configuration from ICFGR and IT_PM_CONFIG_MASK
+ */
+struct gic_it_pm {
+	uint16_t it;
+	uint8_t flags;
+	uint8_t iprio;
+	uint8_t itarget;
+	uint8_t icfg;
+};
+
+struct gic_pm {
+	struct gic_it_pm *pm_cfg;
+	size_t count;
+};
+
 struct gic_data {
 	vaddr_t gicc_base;
 	vaddr_t gicd_base;
 	size_t max_it;
 	struct itr_chip chip;
+#if defined(CFG_ARM_GIC_PM)
+	struct gic_pm pm;
+#endif
 };
 
 static struct gic_data gic_data __nex_bss;
@@ -86,9 +139,22 @@ static void gic_op_enable(struct itr_chip *chip, size_t it);
 static void gic_op_disable(struct itr_chip *chip, size_t it);
 static void gic_op_raise_pi(struct itr_chip *chip, size_t it);
 static void gic_op_raise_sgi(struct itr_chip *chip, size_t it,
-			uint8_t cpu_mask);
+			     uint32_t cpu_mask);
 static void gic_op_set_affinity(struct itr_chip *chip, size_t it,
 			uint8_t cpu_mask);
+
+#if defined(CFG_ARM_GIC_PM)
+static void gic_pm_add_it(struct gic_data *gd, unsigned int it);
+static void gic_pm_register(struct gic_data *gd);
+#else
+static void gic_pm_add_it(struct gic_data *gd __unused,
+			  unsigned int it __unused)
+{
+}
+static void gic_pm_register(struct gic_data *gd __unused)
+{
+}
+#endif
 
 static const struct itr_ops gic_ops = {
 	.add = gic_op_add,
@@ -166,10 +232,10 @@ void gic_cpu_init(void)
 	 * allow the Non-secure world to adjust the priority mask itself
 	 */
 #if defined(CFG_ARM_GICV3)
-	write_icc_pmr(0x80);
+	write_icc_pmr(GIC_HIGHEST_NS_PRIORITY);
 	write_icc_igrpen1(1);
 #else
-	io_write32(gd->gicc_base + GICC_PMR, 0x80);
+	io_write32(gd->gicc_base + GICC_PMR, GIC_HIGHEST_NS_PRIORITY);
 
 	/* Enable GIC */
 	io_write32(gd->gicc_base + GICC_CTLR,
@@ -195,10 +261,10 @@ static int gic_dt_get_irq(const uint32_t *properties, int count, uint32_t *type,
 	it_num = fdt32_to_cpu(properties[1]);
 
 	switch (fdt32_to_cpu(properties[0])) {
-	case 1:
+	case GIC_PPI:
 		it_num += 16;
 		break;
-	case 0:
+	case GIC_SPI:
 		it_num += 32;
 		break;
 	default:
@@ -235,14 +301,13 @@ static void gic_init_base_addr(paddr_t gicc_base_pa, paddr_t gicd_base_pa)
 
 	if (IS_ENABLED(CFG_DT))
 		gd->chip.dt_get_irq = gic_dt_get_irq;
+
+	gic_pm_register(gd);
 }
 
-void gic_init(paddr_t gicc_base_pa, paddr_t gicd_base_pa)
+static void gic_setup_clear_it(struct gic_data __maybe_unused *gd)
 {
-	struct gic_data __maybe_unused *gd = &gic_data;
 	size_t __maybe_unused n = 0;
-
-	gic_init_base_addr(gicc_base_pa, gicd_base_pa);
 
 	/* GIC configuration is initialized from TF-A when embedded */
 #ifndef CFG_WITH_ARM_TRUSTED_FW
@@ -252,7 +317,17 @@ void gic_init(paddr_t gicc_base_pa, paddr_t gicd_base_pa)
 
 		/* Make interrupts non-pending */
 		io_write32(gd->gicd_base + GICD_ICPENDR(n), 0xffffffff);
+	}
+#endif
+}
 
+static void gic_init_setup(struct gic_data __maybe_unused *gd)
+{
+	size_t __maybe_unused n = 0;
+
+	/* GIC configuration is initialized from TF-A when embedded */
+#ifndef CFG_WITH_ARM_TRUSTED_FW
+	for (n = 0; n <= gd->max_it / NUM_INTS_PER_REG; n++) {
 		/* Mark interrupts non-secure */
 		if (n == 0) {
 			/* per-CPU inerrupts config:
@@ -270,11 +345,11 @@ void gic_init(paddr_t gicc_base_pa, paddr_t gicd_base_pa)
 	 * allow the Non-secure world to adjust the priority mask itself
 	 */
 #if defined(CFG_ARM_GICV3)
-	write_icc_pmr(0x80);
+	write_icc_pmr(GIC_HIGHEST_NS_PRIORITY);
 	write_icc_igrpen1(1);
 	io_setbits32(gd->gicd_base + GICD_CTLR, GICD_CTLR_ENABLEGRP1S);
 #else
-	io_write32(gd->gicc_base + GICC_PMR, 0x80);
+	io_write32(gd->gicc_base + GICC_PMR, GIC_HIGHEST_NS_PRIORITY);
 
 	/* Enable GIC */
 	io_write32(gd->gicc_base + GICC_CTLR, GICC_CTLR_FIQEN |
@@ -283,7 +358,13 @@ void gic_init(paddr_t gicc_base_pa, paddr_t gicd_base_pa)
 		     GICD_CTLR_ENABLEGRP0 | GICD_CTLR_ENABLEGRP1);
 #endif
 #endif /*CFG_WITH_ARM_TRUSTED_FW*/
+}
 
+void gic_init(paddr_t gicc_base_pa, paddr_t gicd_base_pa)
+{
+	gic_init_base_addr(gicc_base_pa, gicd_base_pa);
+	gic_setup_clear_it(&gic_data);
+	gic_init_setup(&gic_data);
 	interrupt_main_init(&gic_data.chip);
 }
 
@@ -311,7 +392,8 @@ static void gic_it_set_cpu_mask(struct gic_data *gd, size_t it,
 {
 	size_t idx __maybe_unused = it / NUM_INTS_PER_REG;
 	uint32_t mask __maybe_unused = 1 << (it % NUM_INTS_PER_REG);
-	uint32_t target, target_shift;
+	uint32_t target = 0;
+	uint32_t target_shift = 0;
 	vaddr_t itargetsr = gd->gicd_base +
 			    GICD_ITARGETSR(it / NUM_TARGETS_PER_REG);
 
@@ -337,13 +419,42 @@ static void gic_it_set_prio(struct gic_data *gd, size_t it, uint8_t prio)
 
 	assert(gd == &gic_data);
 
-	/* Assigned to group0 */
-	assert(!(io_read32(gd->gicd_base + GICD_IGROUPR(idx)) & mask));
+	if (io_read32(gd->gicd_base + GICD_IGROUPR(idx)) & mask)
+		DMSG("GIC set prio to non-secure interrupt %zu", it);
 
 	/* Set prio it to selected CPUs */
 	DMSG("prio: writing 0x%x to 0x%" PRIxVA,
 		prio, gd->gicd_base + GICD_IPRIORITYR(0) + it);
 	io_write8(gd->gicd_base + GICD_IPRIORITYR(0) + it, prio);
+}
+
+/*
+ * GIC exported function for platform low power sequence
+ */
+uint8_t gic_set_pmr(uint8_t mask)
+{
+	struct gic_data *gd = &gic_data;
+	uint32_t pmr = io_read32(gd->gicc_base + GICC_PMR);
+
+	/*
+	 * Order memory updates w.r.t. PMR write, and ensure they're visible
+	 * before potential out of band interrupt trigger because of PMR update.
+	 */
+	dsb_ishst();
+	io_write32(gd->gicc_base + GICC_PMR, mask);
+	dsb_ishst();
+
+	return (uint8_t)pmr;
+}
+
+uint8_t gic_set_ipriority(size_t it, uint8_t mask)
+{
+	struct gic_data *gd = &gic_data;
+	uint8_t prio = io_read8(gd->gicd_base + GICD_IPRIORITYR(0) + it);
+
+	gic_it_set_prio(gd, it, mask);
+
+	return prio;
 }
 
 static void gic_it_enable(struct gic_data *gd, size_t it)
@@ -389,22 +500,50 @@ static void gic_it_set_pending(struct gic_data *gd, size_t it)
 	io_write32(gd->gicd_base + GICD_ISPENDR(idx), mask);
 }
 
+static void assert_cpu_mask_is_valid(uint32_t cpu_mask)
+{
+	bool __maybe_unused to_others = cpu_mask & ITR_CPU_MASK_TO_OTHER_CPUS;
+	bool __maybe_unused to_current = cpu_mask & ITR_CPU_MASK_TO_THIS_CPU;
+	bool __maybe_unused to_list = cpu_mask & 0xff;
+
+	/* One and only one of the bit fields shall be non-zero */
+	assert(to_others + to_current + to_list == 1);
+}
+
 static void gic_it_raise_sgi(struct gic_data *gd __maybe_unused, size_t it,
-			     uint8_t cpu_mask, uint8_t group)
+			     uint32_t cpu_mask, uint8_t group)
 {
 #if defined(CFG_ARM_GICV3)
-	/* Only support sending SGI to the cores in the same cluster now */
 	uint32_t mask_id = it & 0xf;
-	uint32_t mask_cpu = cpu_mask & 0xff;
-	uint64_t mpidr = read_mpidr();
-	uint64_t mask_aff1 = (mpidr & MPIDR_AFF1_MASK) >> MPIDR_AFF1_SHIFT;
-	uint64_t mask_aff2 = (mpidr & MPIDR_AFF2_MASK) >> MPIDR_AFF2_SHIFT;
-	uint64_t mask_aff3 = (mpidr & MPIDR_AFF3_MASK) >> MPIDR_AFF3_SHIFT;
-	uint64_t mask = (mask_cpu |
-			SHIFT_U64(mask_aff1, 16) |
-			SHIFT_U64(mask_id, 24)   |
-			SHIFT_U64(mask_aff2, 32) |
-			SHIFT_U64(mask_aff3, 48));
+	uint64_t mask = SHIFT_U64(mask_id, 24);
+
+	assert_cpu_mask_is_valid(cpu_mask);
+
+	if (cpu_mask & ITR_CPU_MASK_TO_OTHER_CPUS) {
+		mask |= BIT64(GICC_SGI_IRM_BIT);
+	} else {
+		uint64_t mpidr = read_mpidr();
+		uint64_t mask_aff1 = (mpidr & MPIDR_AFF1_MASK) >>
+				     MPIDR_AFF1_SHIFT;
+		uint64_t mask_aff2 = (mpidr & MPIDR_AFF2_MASK) >>
+				     MPIDR_AFF2_SHIFT;
+		uint64_t mask_aff3 = (mpidr & MPIDR_AFF3_MASK) >>
+				     MPIDR_AFF3_SHIFT;
+
+		mask |= SHIFT_U64(mask_aff1, GICC_SGI_AFF1_SHIFT);
+		mask |= SHIFT_U64(mask_aff2, GICC_SGI_AFF2_SHIFT);
+		mask |= SHIFT_U64(mask_aff3, GICC_SGI_AFF3_SHIFT);
+
+		if (cpu_mask & ITR_CPU_MASK_TO_THIS_CPU) {
+			mask |= BIT32(mpidr & 0xf);
+		} else {
+			/*
+			 * Only support sending SGI to the cores in the
+			 * same cluster now.
+			 */
+			mask |= cpu_mask & 0xff;
+		}
+	}
 
 	/* Raise the interrupt */
 	if (group)
@@ -412,11 +551,23 @@ static void gic_it_raise_sgi(struct gic_data *gd __maybe_unused, size_t it,
 	else
 		write_icc_sgi1r(mask);
 #else
-	uint32_t mask_id = it & 0xf;
+	uint32_t mask_id = it & GICD_SGIR_SIGINTID_MASK;
 	uint32_t mask_group = group & 0x1;
-	uint32_t mask_cpu = cpu_mask & 0xff;
-	uint32_t mask = (mask_id | SHIFT_U32(mask_group, 15) |
-		SHIFT_U32(mask_cpu, 16));
+	uint32_t mask = mask_id;
+
+	assert_cpu_mask_is_valid(cpu_mask);
+
+	mask |= SHIFT_U32(mask_group, GICD_SGIR_NSATT_SHIFT);
+	if (cpu_mask & ITR_CPU_MASK_TO_OTHER_CPUS) {
+		mask |= SHIFT_U32(GICD_SGIR_TO_OTHER_CPUS,
+				  GICD_SGIR_TARGET_LIST_FILTER_SHIFT);
+	} else if (cpu_mask & ITR_CPU_MASK_TO_THIS_CPU) {
+		mask |= SHIFT_U32(GICD_SGIR_TO_THIS_CPU,
+				  GICD_SGIR_TARGET_LIST_FILTER_SHIFT);
+	} else {
+		mask |= SHIFT_U32(cpu_mask & 0xff,
+				  GICD_SGIR_CPU_TARGET_LIST_SHIFT);
+	}
 
 	/* Raise the interrupt */
 	io_write32(gd->gicd_base + GICD_SGIR, mask);
@@ -535,6 +686,8 @@ static void gic_op_add(struct itr_chip *chip, size_t it,
 	/* Set the CPU mask to deliver interrupts to any online core */
 	gic_it_set_cpu_mask(gd, it, 0xff);
 	gic_it_set_prio(gd, it, 0x1);
+
+	gic_pm_add_it(gd, it);
 }
 
 static void gic_op_enable(struct itr_chip *chip, size_t it)
@@ -574,7 +727,7 @@ static void gic_op_raise_pi(struct itr_chip *chip, size_t it)
 }
 
 static void gic_op_raise_sgi(struct itr_chip *chip, size_t it,
-			uint8_t cpu_mask)
+			     uint32_t cpu_mask)
 {
 	struct gic_data *gd = container_of(chip, struct gic_data, chip);
 
@@ -604,3 +757,174 @@ static void gic_op_set_affinity(struct itr_chip *chip, size_t it,
 
 	gic_it_set_cpu_mask(gd, it, cpu_mask);
 }
+
+#if defined(CFG_ARM_GIC_PM)
+static void gic_pm_add_it(struct gic_data *gd, unsigned int it)
+{
+	struct gic_pm *pm = &gd->pm;
+
+	pm->count++;
+	pm->pm_cfg = realloc(pm->pm_cfg, pm->count * sizeof(*pm->pm_cfg));
+	if (!pm->pm_cfg)
+		panic();
+
+	pm->pm_cfg[pm->count - 1] = (struct gic_it_pm){ .it = it };
+}
+
+static void gic_save_it(struct gic_data *gd, struct gic_it_pm *pm)
+{
+	unsigned int it = pm->it;
+	size_t idx = 0;
+	uint32_t bit_mask = BIT(it % NUM_INTS_PER_REG);
+	uint32_t shift2 = it % (NUM_INTS_PER_REG / 2) * 2;
+	uint32_t shift8 = it % (NUM_INTS_PER_REG / 8) * 8;
+	uint32_t data32 = 0;
+
+	pm->flags = 0;
+	idx = it / NUM_INTS_PER_REG;
+
+	if (io_read32(gd->gicd_base + GICD_IGROUPR(idx)) & bit_mask)
+		pm->flags |= IT_PM_GPOUP1_BIT;
+	if (io_read32(gd->gicd_base + GICD_ISENABLER(idx)) & bit_mask)
+		pm->flags |= IT_PM_ENABLE_BIT;
+	if (io_read32(gd->gicd_base + GICD_ISPENDR(idx)) & bit_mask)
+		pm->flags |= IT_PM_PENDING_BIT;
+	if (io_read32(gd->gicd_base + GICD_ISACTIVER(idx)) & bit_mask)
+		pm->flags |= IT_PM_ACTIVE_BIT;
+
+	idx = (8 * it) / NUM_INTS_PER_REG;
+
+	data32 = io_read32(gd->gicd_base + GICD_IPRIORITYR(idx)) >> shift8;
+	pm->iprio = (uint8_t)data32;
+
+	data32 = io_read32(gd->gicd_base + GICD_ITARGETSR(idx)) >> shift8;
+	pm->itarget = (uint8_t)data32;
+
+	/* Note: ICFGR is RAO for SPIs and PPIs */
+	idx = (2 * it) / NUM_INTS_PER_REG;
+	data32 = io_read32(gd->gicd_base + GICD_ICFGR(idx)) >> shift2;
+	pm->icfg = (uint8_t)data32 & IT_PM_CONFIG_MASK;
+}
+
+static void gic_restore_it(struct gic_data *gd, struct gic_it_pm *pm)
+{
+	unsigned int it = pm->it;
+	size_t idx = it / NUM_INTS_PER_REG;
+	uint32_t mask = BIT(it % NUM_INTS_PER_REG);
+	uint32_t shift2 = it % (NUM_INTS_PER_REG / 2) * 2;
+	uint32_t shift8 = it % (NUM_INTS_PER_REG / 8) * 8;
+
+	io_mask32(gd->gicd_base + GICD_IGROUPR(idx),
+		  (pm->flags & IT_PM_GPOUP1_BIT) ? mask : 0, mask);
+
+	io_mask32(gd->gicd_base + GICD_ISENABLER(idx),
+		  (pm->flags & IT_PM_ENABLE_BIT) ? mask : 0, mask);
+
+	io_mask32(gd->gicd_base + GICD_ISPENDR(idx),
+		  (pm->flags & IT_PM_PENDING_BIT) ? mask : 0, mask);
+
+	io_mask32(gd->gicd_base + GICD_ISACTIVER(idx),
+		  (pm->flags & IT_PM_ACTIVE_BIT) ? mask : 0, mask);
+
+	idx = (8 * it) / NUM_INTS_PER_REG;
+
+	io_mask32(gd->gicd_base + GICD_IPRIORITYR(idx),
+		  (uint32_t)pm->iprio << shift8, UINT8_MAX << shift8);
+
+	io_mask32(gd->gicd_base + GICD_ITARGETSR(idx),
+		  (uint32_t)pm->itarget << shift8, UINT8_MAX << shift8);
+
+	/* Note: ICFGR is WI for SPIs and PPIs */
+	idx = (2 * it) / NUM_INTS_PER_REG;
+	io_mask32(gd->gicd_base + GICD_ICFGR(idx),
+		  (uint32_t)pm->icfg << shift2, IT_PM_CONFIG_MASK << shift2);
+}
+
+static TEE_Result gic_pm(enum pm_op op, unsigned int pm_hint __unused,
+			 const struct pm_callback_handle *handle)
+{
+	void (*sequence)(struct gic_data *gd, struct gic_it_pm *pm) = NULL;
+	struct gic_it_pm *cfg = NULL;
+	unsigned int n = 0;
+	struct gic_data *gd = (struct gic_data *)PM_CALLBACK_GET_HANDLE(handle);
+	struct gic_pm *pm = &gd->pm;
+
+	if (op == PM_OP_SUSPEND) {
+		sequence = gic_save_it;
+	} else {
+		gic_init_setup(gd);
+		sequence = gic_restore_it;
+	}
+	for (n = 0, cfg = pm->pm_cfg; n < pm->count; n++, cfg++)
+		sequence(gd, cfg);
+
+	return TEE_SUCCESS;
+}
+DECLARE_KEEP_PAGER_PM(gic_pm);
+
+static void gic_pm_register(struct gic_data *gd)
+{
+	register_pm_core_service_cb(gic_pm, gd, "arm-gic");
+}
+#endif /*CFG_ARM_GIC_PM*/
+
+#ifdef CFG_DT
+/* Callback for "interrupts" and "interrupts-extended" DT node properties */
+static TEE_Result dt_get_gic_chip_cb(struct dt_pargs *arg, void *priv_data,
+				     struct itr_desc *itr_desc)
+{
+	int itr_num = DT_INFO_INVALID_INTERRUPT;
+	struct itr_chip *chip = priv_data;
+	uint32_t phandle_args[2] = { };
+	uint32_t type = 0;
+	uint32_t prio = 0;
+
+	assert(arg && itr_desc);
+
+	/*
+	 * gic_dt_get_irq() expects phandle arguments passed are still in DT
+	 * format (big-endian) whereas struct dt_pargs carries converted
+	 * formats. Therefore swap again phandle arguments. gic_dt_get_irq()
+	 * consumes only the 2 first arguments.
+	 */
+	if (arg->args_count < 2)
+		return TEE_ERROR_GENERIC;
+	phandle_args[0] = cpu_to_fdt32(arg->args[0]);
+	phandle_args[1] = cpu_to_fdt32(arg->args[1]);
+
+	itr_num = gic_dt_get_irq((const void *)phandle_args, 2, &type, &prio);
+	if (itr_num == DT_INFO_INVALID_INTERRUPT)
+		return TEE_ERROR_GENERIC;
+
+	gic_op_add(chip, itr_num, type, prio);
+
+	itr_desc->chip = chip;
+	itr_desc->itr_num = itr_num;
+
+	return TEE_SUCCESS;
+}
+
+static TEE_Result gic_probe(const void *fdt, int offs, const void *cd __unused)
+{
+	if (interrupt_register_provider(fdt, offs, dt_get_gic_chip_cb,
+					&gic_data.chip))
+		panic();
+
+	return TEE_SUCCESS;
+}
+
+static const struct dt_device_match gic_match_table[] = {
+	{ .compatible = "arm,cortex-a15-gic" },
+	{ .compatible = "arm,cortex-a7-gic" },
+	{ .compatible = "arm,cortex-a5-gic" },
+	{ .compatible = "arm,cortex-a9-gic" },
+	{ .compatible = "arm,gic-400" },
+	{ }
+};
+
+DEFINE_DT_DRIVER(gic_dt_driver) = {
+	.name = "gic",
+	.match_table = gic_match_table,
+	.probe = gic_probe,
+};
+#endif /*CFG_DT*/

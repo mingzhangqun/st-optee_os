@@ -2,8 +2,8 @@
 /*
  * Copyright (c) 2014-2017, Linaro Limited
  */
-#ifndef KERNEL_MUTEX_H
-#define KERNEL_MUTEX_H
+#ifndef __KERNEL_MUTEX_H
+#define __KERNEL_MUTEX_H
 
 #include <kernel/refcount.h>
 #include <kernel/wait_queue.h>
@@ -101,5 +101,14 @@ void condvar_broadcast(struct condvar *cv);
 void condvar_wait(struct condvar *cv, struct mutex *m);
 #endif
 
-#endif /*KERNEL_MUTEX_H*/
+/*
+ * Helper for testing that a given mutex is locked for writing. This helper
+ * is to be used with caution since it does not guarantee that the executing
+ * thread is holding the mutex.
+ */
+static inline bool mutex_is_locked(struct mutex *m)
+{
+	return m->state == -1; /* write locked */
+}
+#endif /*__KERNEL_MUTEX_H*/
 

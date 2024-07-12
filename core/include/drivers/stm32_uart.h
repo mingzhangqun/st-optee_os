@@ -3,8 +3,8 @@
  * Copyright (c) 2017-2023, STMicroelectronics
  */
 
-#ifndef DRIVERS_STM32_UART_H
-#define DRIVERS_STM32_UART_H
+#ifndef __DRIVERS_STM32_UART_H
+#define __DRIVERS_STM32_UART_H
 
 #include <drivers/clk.h>
 #include <drivers/pinctrl.h>
@@ -19,7 +19,11 @@ struct stm32_uart_pdata {
 	bool secure;
 	struct clk *clock;
 	struct pinctrl_state *pinctrl;
-	struct pinctrl_state *pinctrl_sleep;
+	uint32_t brr;
+	uint32_t presc;
+	uint32_t cr1;
+	uint32_t cr2;
+	uint32_t cr3;
 };
 
 /*
@@ -29,17 +33,4 @@ struct stm32_uart_pdata {
  */
 void stm32_uart_init(struct stm32_uart_pdata *pd, vaddr_t base);
 
-/*
- * stm32_uart_init_from_dt_node - Initialize a UART instance from a DTB node
- * @fdt: DTB base address
- * @node: Target node offset in the DTB
- * Returns an alloced (malloc) and inited UART platform data on success or NULL
- *
- * This function gets a STM32 UART configuration directives from a DTB node
- * and initializes a UART driver instance.
- * When the DTB specifies that the device is disabled, the function returns
- * NULL. Other issues panic the sequence.
- */
-struct stm32_uart_pdata *stm32_uart_init_from_dt_node(void *fdt, int node);
-
-#endif /*DRIVERS_STM32_UART_H*/
+#endif /*__DRIVERS_STM32_UART_H*/

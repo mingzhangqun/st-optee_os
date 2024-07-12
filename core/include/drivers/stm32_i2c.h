@@ -3,14 +3,15 @@
  * Copyright (c) 2017-2023, STMicroelectronics
  */
 
-#ifndef DRIVERS_STM32_I2C_H
-#define DRIVERS_STM32_I2C_H
+#ifndef __DRIVERS_STM32_I2C_H
+#define __DRIVERS_STM32_I2C_H
 
 #include <drivers/clk.h>
 #include <drivers/i2c.h>
 #include <drivers/pinctrl.h>
 #include <kernel/dt.h>
 #include <kernel/dt_driver.h>
+#include <kernel/mutex_pm_aware.h>
 #include <mm/core_memprot.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -114,6 +115,8 @@ struct i2c_cfg {
  * @sec_cfg: I2C registers configuration storage
  * @pinctrl: Pin control configuration for the I2C bus in active state
  * @pinctrl_sleep: Pin control configuration for the I2C bus in standby state
+ * @mu: Protection on concurrent access to the I2C bus considering PM context
+ * @i2c_secure: Indicates that the I2C is secure
  */
 struct i2c_handle_s {
 	struct io_pa_va base;
@@ -127,6 +130,8 @@ struct i2c_handle_s {
 	struct i2c_cfg sec_cfg;
 	struct pinctrl_state *pinctrl;
 	struct pinctrl_state *pinctrl_sleep;
+	struct mutex_pm_aware mu;
+	bool i2c_secure;
 };
 
 /*
@@ -278,4 +283,4 @@ static inline bool i2c_is_secure(struct i2c_handle_s *hi2c)
 	return hi2c->dt_status == DT_STATUS_OK_SEC;
 }
 
-#endif /* DRIVERS_STM32_I2C_H*/
+#endif /* __DRIVERS_STM32_I2C_H*/

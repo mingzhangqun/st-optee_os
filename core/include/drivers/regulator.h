@@ -2,12 +2,12 @@
 /*
  * Copyright (c) 2023, STMicroelectronics
  */
-#ifndef DRIVERS_REGULATOR_H
-#define DRIVERS_REGULATOR_H
+#ifndef __DRIVERS_REGULATOR_H
+#define __DRIVERS_REGULATOR_H
 
 #include <assert.h>
 #include <bitstring.h>
-#include <kernel/mutex.h>
+#include <kernel/mutex_pm_aware.h>
 #include <sys/queue.h>
 #include <tee_api_types.h>
 #include <stdbool.h>
@@ -26,9 +26,17 @@
  * DT property: regulator-boot-on
  */
 #define REGULATOR_BOOT_ON	BIT(2)
+/*
+ * Enables over current protection.
+ * DT property: regulator-over-current-protection
+ */
+#define REGULATOR_OVER_CURRENT	BIT(3)
+/* Enable active discharge. DT property: regulator-active-discharge */
+#define REGULATOR_ACTIVE_DISCHARGE	BIT(4)
 
 #define REGULATOR_FLAGS_MASK	(REGULATOR_ALWAYS_ON | REGULATOR_PULL_DOWN | \
-				 REGULATOR_BOOT_ON)
+				 REGULATOR_BOOT_ON | REGULATOR_OVER_CURRENT | \
+				 REGULATOR_ACTIVE_DISCHARGE)
 
 struct regulator_ops;
 
@@ -67,16 +75,14 @@ enum voltage_type {
 };
 
 /*
- * struct regulator_voltages - Voltage levels description
+ * struct regulator_voltages_desc - Voltage levels description
  * @type: Type of level description
- * @num_levels: Number of cells of @entries when @type is VOLTAGE_TYPE_FULL_LIST
- * @entries: Voltage level information in uV
+ * @num_levels: Number of voltage levels when @type is VOLTAGE_TYPE_FULL_LIST
  *
  */
-struct regulator_voltages {
+struct regulator_voltages_desc {
 	enum voltage_type type;
 	size_t num_levels;
-	int entries[];
 };
 
 /*
@@ -87,10 +93,11 @@ struct regulator_voltages {
  * @name: Regulator string name for debug purpose or NULL
  * @min_uv: Min possible voltage level in microvolt (uV)
  * @max_uv: Max possible voltage level in microvolt (uV)
- * @cur_uv: Current voltage level in microvolt (uV)
+ * @ramp_delay_uv_per_us: Voltage level change delay in uV/s
+ * @enable_ramp_delay_us: Delay after enable, in microseconds (us)
  * @flags: REGULATOR_* property flags
  * @refcount: Regulator enable request reference counter
- * @lock: Mutex for concurrent access protection
+ * @mutex: Concurrent access protection considering PM context sequences
  * @voltages_fallback: Default supported voltage range description
  * @link: Link in initialized regulator list
  */
@@ -102,13 +109,14 @@ struct regulator {
 	char *name;
 	int min_uv;
 	int max_uv;
+	unsigned int ramp_delay_uv_per_us;
+	unsigned int enable_ramp_delay_us;
 	/* Fields internal to regulator framework */
-	int cur_uv;
 	unsigned int flags;
 	unsigned int refcount;
-	struct mutex lock;	/* Concurrent access protection */
+	struct mutex_pm_aware mutex;
 	struct voltages_fallback {
-		struct regulator_voltages desc;
+		struct regulator_voltages_desc desc;
 		int levels[3];
 	} voltages_fallback;
 	size_t levels_count_fallback;
@@ -123,6 +131,7 @@ struct regulator {
  * @set_voltage: Set voltage level in microvolt (uV)
  * @get_voltage: Get current voltage in microvolt (uV)
  * @supported_voltages: Get supported levels description
+ * @init: Optional, initialization before device tree parsing
  * @supplied_init: Optional, finalize initialization once supply is ready
  */
 struct regulator_ops {
@@ -131,7 +140,9 @@ struct regulator_ops {
 	TEE_Result (*set_voltage)(struct regulator *r, int level_uv);
 	TEE_Result (*get_voltage)(struct regulator *r, int *level_uv);
 	TEE_Result (*supported_voltages)(struct regulator *r,
-					 struct regulator_voltages **voltages);
+					 struct regulator_voltages_desc **desc,
+					 const int **levels);
+	TEE_Result (*init)(struct regulator *r);
 	TEE_Result (*supplied_init)(struct regulator *r, const void *fdt,
 				    int node);
 };
@@ -164,6 +175,13 @@ bool regulator_is_enabled(struct regulator *regulator);
 TEE_Result regulator_set_voltage(struct regulator *regulator, int level_uv);
 
 /*
+ * regulator_get_by_name() - Get a regulator from its name
+ * @name - name of the regulator
+ * Return pointer to regulator if succeed, NULL else.
+ */
+struct regulator *regulator_get_by_name(const char *name);
+
+/*
  * regulator_register() - Register and initialize a regulator
  * @regulator: Regulator reference
  */
@@ -189,6 +207,11 @@ static inline bool regulator_is_enabled(struct regulator *regulator __unused)
 
 static inline TEE_Result regulator_set_voltage(struct regulator *regul __unused,
 					       int level_mv __unused)
+{
+	return TEE_ERROR_NOT_SUPPORTED;
+}
+
+static inline struct regulator *regulator_get_by_name(const char *name)
 {
 	return TEE_ERROR_NOT_SUPPORTED;
 }
@@ -287,10 +310,7 @@ static inline TEE_Result regulator_set_min_voltage(struct regulator *regulator)
  * regulator_get_voltage() - Get regulator current level in microvolt
  * @regulator: Regulator reference
  */
-static inline int regulator_get_voltage(struct regulator *regulator)
-{
-	return regulator->cur_uv;
-}
+int regulator_get_voltage(struct regulator *regulator);
 
 /*
  * regulator_get_range() - Get regulator min and/or max support levels
@@ -311,8 +331,25 @@ static inline void regulator_get_range(struct regulator *regulator, int *min_uv,
 /*
  * regulator_supported_voltages() - Get regulator supported levels in microvolt
  * @regulator: Regulator reference
- * @voltages: Output description supported voltage levels
+ * @desc: Output reference to supported voltage levels description
+ * @levels: Output reference to voltage level array, in microvolts
+ *
+ * When @desc->type is VOLTAGE_TYPE_FULL_LIST, number of cells of @*levels
+ * is defined by @desc->num_levels, each cell being a level in microvolts (uV).
+ * When @desc->type is VOLTAGE_TYPE_INCREMENT, @levels has 3 cells:
+ * @levels[0] is the min voltage level, @levels[1] is the max level, @levels[2]
+ * is the incremental level step, all in microvolts (uV).
  */
 TEE_Result regulator_supported_voltages(struct regulator *regulator,
-					struct regulator_voltages **voltages);
-#endif /* DRIVERS_REGULATOR_H */
+					struct regulator_voltages_desc **desc,
+					const int **levels);
+
+/* Print current regulator tree summary to console with debug trace level */
+#ifdef CFG_DRIVERS_REGULATOR
+void regulator_print_tree(void);
+#else
+static inline void regulator_print_tree(void)
+{
+}
+#endif /* CFG_DRIVERS_REGULATOR */
+#endif /* __DRIVERS_REGULATOR_H */

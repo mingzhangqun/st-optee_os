@@ -617,9 +617,31 @@ int fdt_node_depth(const void *fdt, int nodeoffset)
 	return nodedepth;
 }
 
+#ifdef CFG_DT_CACHED_NODE_INFO
+/* This function is OP-TEE specific, outside of libfdt */
+int fdt_find_cached_parent_node(const void *fdt, int node_offset,
+				int *parent_offset);
+#else
+static int fdt_find_cached_parent_node(const void *fdt, int node_offset,
+				       int *parent_offset)
+{
+	(void)fdt;
+	(void)node_offset;
+	(void)parent_offset;
+
+	return -1;
+}
+#endif
+
 int fdt_parent_offset(const void *fdt, int nodeoffset)
 {
-	int nodedepth = fdt_node_depth(fdt, nodeoffset);
+	int parent_offset = 0;
+	int nodedepth = 0;
+
+	if (fdt_find_cached_parent_node(fdt, nodeoffset, &parent_offset) == 0)
+		return parent_offset;
+
+	nodedepth = fdt_node_depth(fdt, nodeoffset);
 
 	if (nodedepth < 0)
 		return nodedepth;
@@ -654,12 +676,31 @@ int fdt_node_offset_by_prop_value(const void *fdt, int startoffset,
 	return offset; /* error from fdt_next_node() */
 }
 
+#ifdef CFG_DT_CACHED_NODE_INFO
+/* This function is OP-TEE specific, outside of libfdt */
+int fdt_find_cached_node_phandle(const void *fdt, uint32_t phandle,
+				 int *node_offset);
+#else
+static int fdt_find_cached_node_phandle(const void *fdt, uint32_t phandle,
+					int *node_offset)
+{
+	(void)fdt;
+	(void)phandle;
+	(void)node_offset;
+
+	return -1;
+}
+#endif
+
 int fdt_node_offset_by_phandle(const void *fdt, uint32_t phandle)
 {
 	int offset;
 
 	if ((phandle == 0) || (phandle == -1))
 		return -FDT_ERR_BADPHANDLE;
+
+	if (fdt_find_cached_node_phandle(fdt, phandle, &offset) == 0)
+		return offset;
 
 	FDT_RO_PROBE(fdt);
 

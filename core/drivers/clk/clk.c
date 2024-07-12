@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSD-2-Clause
 /*
  * Copyright (c) 2021, Bootlin
+ * Copyright (c) 2023, STMicroelectronics
  */
 
+#include <config.h>
 #include <drivers/clk.h>
 #include <kernel/boot.h>
 #include <kernel/panic.h>
@@ -10,9 +12,14 @@
 #include <libfdt.h>
 #include <malloc.h>
 #include <stddef.h>
+#include <stdio.h>
 
 /* Global clock tree lock */
 static unsigned int clk_lock = SPINLOCK_UNLOCK;
+
+#if defined(CFG_DRIVERS_CLK_PRINT_TREE)
+static SLIST_HEAD(, clk) clock_list = SLIST_HEAD_INITIALIZER(clock_list);
+#endif
 
 struct clk *clk_alloc(const char *name, const struct clk_ops *ops,
 		      struct clk **parent_clks, size_t parent_count)
@@ -42,7 +49,7 @@ void clk_free(struct clk *clk)
 
 static bool __maybe_unused clk_check(struct clk *clk)
 {
-	if (!clk->ops)
+	if (!clk || !clk->ops)
 		return false;
 
 	if (clk->ops->set_parent && !clk->ops->get_parent)
@@ -94,12 +101,34 @@ static void clk_init_parent(struct clk *clk)
 	}
 }
 
+TEE_Result clk_reparent(struct clk *clk, struct clk *parent)
+{
+	size_t i = 0;
+
+	if (clk->parent == parent)
+		return TEE_SUCCESS;
+
+	for (i = 0; i < clk_get_num_parents(clk); i++) {
+		if (clk_get_parent_by_index(clk, i) == parent) {
+			clk->parent = parent;
+			return TEE_SUCCESS;
+		}
+	}
+	EMSG("Clock %s is not a parent of clock %s", parent->name, clk->name);
+
+	return TEE_ERROR_BAD_PARAMETERS;
+}
+
 TEE_Result clk_register(struct clk *clk)
 {
 	assert(clk_check(clk));
 
 	clk_init_parent(clk);
 	clk_compute_rate_no_lock(clk);
+
+#if defined(CFG_DRIVERS_CLK_PRINT_TREE)
+	SLIST_INSERT_HEAD(&clock_list, clk, link);
+#endif
 
 	DMSG("Registered clock %s, freq %lu", clk->name, clk_get_rate(clk));
 
@@ -184,44 +213,21 @@ void clk_disable(struct clk *clk)
 
 unsigned long clk_get_rate(struct clk *clk)
 {
-	return clk->rate;
-}
+	unsigned long rate = clk->rate;
 
-static TEE_Result clk_set_rate_no_lock(struct clk *clk, unsigned long rate)
-{
-	TEE_Result res = TEE_ERROR_GENERIC;
-	unsigned long parent_rate = 0;
+	if (clk->ops->get_rate) {
+		unsigned long parent_rate =  0UL;
+
+		if (clk->parent)
+			parent_rate = clk_get_rate(clk->parent);
+
+		return clk->ops->get_rate(clk, parent_rate);
+	}
 
 	if (clk->parent)
-		parent_rate = clk_get_rate(clk->parent);
+		rate = clk_get_rate(clk->parent);
 
-	res = clk->ops->set_rate(clk, rate, parent_rate);
-	if (res)
-		return res;
-
-	clk_compute_rate_no_lock(clk);
-
-	return TEE_SUCCESS;
-}
-
-TEE_Result clk_set_rate(struct clk *clk, unsigned long rate)
-{
-	uint32_t exceptions = 0;
-	TEE_Result res = TEE_ERROR_GENERIC;
-
-	if (!clk->ops->set_rate)
-		return TEE_ERROR_NOT_SUPPORTED;
-
-	exceptions =  cpu_spin_lock_xsave(&clk_lock);
-
-	if (clk->flags & CLK_SET_RATE_GATE && clk_is_enabled_no_lock(clk))
-		res = TEE_ERROR_BAD_STATE;
-	else
-		res = clk_set_rate_no_lock(clk, rate);
-
-	cpu_spin_unlock_xrestore(&clk_lock, exceptions);
-
-	return res;
+	return rate;
 }
 
 struct clk *clk_get_parent(struct clk *clk)
@@ -229,8 +235,8 @@ struct clk *clk_get_parent(struct clk *clk)
 	return clk->parent;
 }
 
-static TEE_Result clk_get_parent_idx(struct clk *clk, struct clk *parent,
-				     size_t *pidx)
+TEE_Result clk_get_parent_idx(struct clk *clk, struct clk *parent,
+			      size_t *pidx)
 {
 	size_t i = 0;
 
@@ -248,6 +254,7 @@ static TEE_Result clk_get_parent_idx(struct clk *clk, struct clk *parent,
 static TEE_Result clk_set_parent_no_lock(struct clk *clk, struct clk *parent,
 					 size_t pidx)
 {
+	struct clk *old_parent = clk->parent;
 	TEE_Result res = TEE_ERROR_GENERIC;
 	bool was_enabled = false;
 
@@ -256,9 +263,16 @@ static TEE_Result clk_set_parent_no_lock(struct clk *clk, struct clk *parent,
 		return TEE_SUCCESS;
 
 	was_enabled = clk_is_enabled_no_lock(clk);
-	/* Call is needed to decrement refcount on current parent tree */
-	if (was_enabled)
-		clk_disable_no_lock(clk);
+
+	if (clk->flags & CLK_OPS_PARENT_ENABLE) {
+		res = clk_enable_no_lock(parent);
+		if (res)
+			panic("Failed to re-enable clock after setting parent");
+
+		res = clk_enable_no_lock(old_parent);
+		if (res)
+			panic("Failed to re-enable clock after setting parent");
+	}
 
 	res = clk->ops->set_parent(clk, pidx);
 	if (res)
@@ -269,12 +283,18 @@ static TEE_Result clk_set_parent_no_lock(struct clk *clk, struct clk *parent,
 	/* The parent changed and the rate might also have changed */
 	clk_compute_rate_no_lock(clk);
 
-out:
-	/* Call is needed to increment refcount on the new parent tree */
+	/* Call is needed to decrement refcount on current parent tree */
 	if (was_enabled) {
-		res = clk_enable_no_lock(clk);
+		res = clk_enable_no_lock(parent);
 		if (res)
 			panic("Failed to re-enable clock after setting parent");
+
+		clk_disable_no_lock(old_parent);
+	}
+out:
+	if (clk->flags & CLK_OPS_PARENT_ENABLE) {
+		clk_disable_no_lock(old_parent);
+		clk_disable_no_lock(parent);
 	}
 
 	return res;
@@ -309,4 +329,364 @@ TEE_Result clk_get_rates_array(struct clk *clk, size_t start_index,
 		return TEE_ERROR_NOT_SUPPORTED;
 
 	return clk->ops->get_rates_array(clk, start_index, rates, nb_elts);
+}
+
+TEE_Result clk_get_rates_steps(struct clk *clk, unsigned long *min,
+			       unsigned long *max, unsigned long *step)
+{
+	if (!clk->ops->get_rates_steps)
+		return TEE_ERROR_NOT_SUPPORTED;
+
+	return clk->ops->get_rates_steps(clk, min, max, step);
+}
+
+static void clk_init_rate_req(struct clk *clk,
+			      struct clk_rate_request *req)
+{
+	struct clk *parent = clk->parent;
+
+	if (parent) {
+		req->best_parent = parent;
+		req->best_parent_rate = parent->rate;
+	} else {
+		req->best_parent = NULL;
+		req->best_parent_rate = 0;
+	}
+}
+
+static TEE_Result clk_set_rate_no_lock(struct clk *clk, unsigned long rate)
+{
+	TEE_Result res = TEE_SUCCESS;
+	unsigned long parent_rate = 0;
+	unsigned long new_rate = rate;
+	struct clk *parent = clk->parent;
+
+	if (parent)
+		parent_rate = parent->rate;
+
+	/* find the closest rate and parent clk/rate */
+	if (clk->ops->determine_rate) {
+		struct clk_rate_request req = { };
+		struct clk *old_parent = clk->parent;
+
+		req.rate = rate;
+
+		clk_init_rate_req(clk, &req);
+
+		res = clk->ops->determine_rate(clk, &req);
+		if (res)
+			return res;
+
+		parent_rate = req.best_parent_rate;
+		new_rate = req.rate;
+		parent = req.best_parent;
+
+		res = clk_set_rate_no_lock(parent, parent_rate);
+		if (res)
+			return res;
+
+		if (parent && parent != old_parent) {
+			if (parent && clk->num_parents > 1) {
+				size_t pidx = 0;
+
+				if (clk_get_parent_idx(clk, parent, &pidx))
+					return TEE_ERROR_BAD_PARAMETERS;
+
+				res = clk_set_parent_no_lock(clk, parent, pidx);
+				if (res)
+					return res;
+				clk->parent = parent;
+			}
+		}
+	} else if (!parent || !(clk->flags & CLK_SET_RATE_PARENT)) {
+		/* pass-through clock without adjustable parent */
+		new_rate  = rate;
+	} else {
+		/* pass-through clock with adjustable parent */
+		res = clk_set_rate_no_lock(parent, rate);
+		if (res)
+			return res;
+		new_rate = parent->rate;
+	}
+
+	if (clk->ops->set_rate) {
+		if (clk->flags & CLK_SET_RATE_UNGATE)
+			clk_enable_no_lock(clk);
+
+		res = clk->ops->set_rate(clk, new_rate, parent_rate);
+
+		if (clk->flags & CLK_SET_RATE_UNGATE)
+			clk_disable_no_lock(clk);
+
+		if (res)
+			return res;
+	}
+
+	clk_compute_rate_no_lock(clk);
+
+	return res;
+}
+
+TEE_Result clk_set_rate(struct clk *clk, unsigned long rate)
+{
+	uint32_t exceptions = 0;
+	TEE_Result res = TEE_ERROR_GENERIC;
+
+	/* bail early if nothing to do */
+	if (rate == clk_get_rate(clk))
+		return TEE_SUCCESS;
+
+	exceptions =  cpu_spin_lock_xsave(&clk_lock);
+
+	if (clk->flags & CLK_SET_RATE_GATE && clk_is_enabled_no_lock(clk))
+		res = TEE_ERROR_BAD_STATE;
+	else
+		res = clk_set_rate_no_lock(clk, rate);
+
+	cpu_spin_unlock_xrestore(&clk_lock, exceptions);
+
+	return res;
+}
+
+TEE_Result clk_get_duty_cycle(struct clk *clk, struct clk_duty *duty)
+{
+	if (clk->ops->get_duty_cycle)
+		return clk->ops->get_duty_cycle(clk, duty);
+
+	if (clk->parent && (clk->flags & CLK_DUTY_CYCLE_PARENT))
+		return clk_get_duty_cycle(clk->parent, duty);
+
+	duty->num = 1;
+	duty->den = 2;
+
+	return TEE_SUCCESS;
+}
+
+unsigned long clk_round_rate(struct clk *clk, unsigned long rate)
+{
+	struct clk *parent = clk->parent;
+	unsigned long parent_rate = 0;
+	unsigned long new_rate = rate;
+
+	/* find the closest rate */
+	if (clk->ops->determine_rate) {
+		struct clk_rate_request req = { };
+		TEE_Result res = TEE_ERROR_GENERIC;
+
+		req.rate = rate;
+
+		clk_init_rate_req(clk, &req);
+
+		res = clk->ops->determine_rate(clk, &req);
+		if (res) {
+			DMSG("determine_rate() failed( %d)", res);
+			return 0;
+		}
+
+		new_rate = req.rate;
+	} else if (clk->ops->round_rate) {
+		if (parent)
+			parent_rate = parent->rate;
+		new_rate = clk->ops->round_rate(clk, rate, parent_rate);
+	} else if (parent && (clk->flags & CLK_SET_RATE_PARENT)) {
+		/* pass-through clock with adjustable parent */
+		new_rate = clk_round_rate(parent, rate);
+	} else {
+		new_rate  = rate;
+	}
+
+	return new_rate;
+}
+
+/* Return updated message buffer position of NULL on failure */
+static __printf(3, 4) char *add_msg(char *cur, char *end, const char *fmt, ...)
+{
+	va_list ap = { };
+	int max_len = end - cur;
+	int ret = 0;
+
+	va_start(ap, fmt);
+	ret = vsnprintf(cur, max_len, fmt, ap);
+	va_end(ap);
+
+	if (ret < 0 || ret >= max_len)
+		return NULL;
+
+	return cur + ret;
+}
+
+static struct clk *find_next_clk(struct clk *parent __maybe_unused,
+				 struct clk *sibling __maybe_unused)
+{
+	struct clk *clk = NULL;
+
+#ifdef CFG_DRIVERS_CLK_PRINT_TREE
+	if (sibling)
+		clk = SLIST_NEXT(sibling, link);
+	else
+		clk = SLIST_FIRST(&clock_list);
+
+	while (clk && clk->parent != parent)
+		clk = SLIST_NEXT(clk, link);
+#endif
+
+	return clk;
+}
+
+static bool clk_is_parent_last_child(struct clk *clk)
+{
+	return !find_next_clk(clk->parent, clk);
+}
+
+static bool indent_last_node_already_found(struct clk *node_clk,
+					   int node_indent, int cur_indent)
+{
+	struct clk *clk = node_clk;
+	int n = 0;
+
+	/* Find parent clock at level @node_indent - @cur_indent - 1 */
+	for (n = 0; n < node_indent - cur_indent - 1; n++)
+		clk = clk->parent;
+
+	return clk_is_parent_last_child(clk);
+}
+
+static void __maybe_unused print_clk(struct clk *clk, int indent)
+{
+	static const char * const rate_unit[] = { "Hz", "kHz", "MHz", "GHz" };
+	int max_unit = ARRAY_SIZE(rate_unit);
+	unsigned long rate = 0;
+	char msg_buf[128] = { };
+	char *msg_end = msg_buf + sizeof(msg_buf);
+	char *msg = msg_buf;
+	int n = 0;
+
+	/*
+	 * Currently prints the clock state based on the clock refcount.
+	 * A future change could print the hardware clock state when
+	 * related clock driver provides a struct clk_ops::is_enabled handler
+	 */
+
+	if (indent) {
+		/* Indent for root clock level */
+		msg = add_msg(msg, msg_end, "   ");
+		if (!msg)
+			goto out;
+
+		/* Indent for root parent to clock parent levels */
+		for (n = 0; n < indent - 1; n++) {
+			if (indent_last_node_already_found(clk, indent, n))
+				msg = add_msg(msg, msg_end, "    ");
+			else
+				msg = add_msg(msg, msg_end, "|   ");
+
+			if (!msg)
+				goto out;
+		}
+
+		/* Clock indentation */
+		if (clk_is_parent_last_child(clk))
+			msg = add_msg(msg, msg_end, "`-- ");
+		else
+			msg = add_msg(msg, msg_end, "|-- ");
+	} else {
+		/* Root clock indentation */
+		msg = add_msg(msg, msg_end, "o- ");
+	}
+	if (!msg)
+		goto out;
+
+	rate = clk_get_rate(clk);
+	for (n = 1; rate && !(rate % 1000) && n < max_unit; n++)
+		rate /= 1000;
+
+	msg = add_msg(msg, msg_end, "%s \t(%3s / refcnt %u / %ld %s)",
+		      clk_get_name(clk),
+		      refcount_val(&clk->enabled_count) ? "on " : "off",
+		      refcount_val(&clk->enabled_count),
+		      rate, rate_unit[n - 1]);
+	if (!msg)
+		goto out;
+
+out:
+	if (!msg)
+		snprintf(msg_end - 4, 4, "...");
+
+	IMSG("%s", msg_buf);
+}
+
+static void print_tree(void)
+{
+	struct clk *clk = NULL;
+	struct clk *parent = NULL;
+	struct clk *next = NULL;
+	int indent = -1;
+
+#ifdef CFG_DRIVERS_CLK_PRINT_TREE
+	if (SLIST_EMPTY(&clock_list)) {
+		IMSG("-- No registered clock");
+		return;
+	}
+#endif
+
+	while (true) {
+		next = find_next_clk(parent, clk);
+		if (next) {
+			print_clk(next, indent + 1);
+			/* Enter the subtree of the next clock */
+			parent = next;
+			indent++;
+			clk = NULL;
+		} else {
+			/*
+			 * We've processed all children at this level.
+			 * If parent is NULL we're at the top and are done.
+			 */
+			if (!parent)
+				break;
+			/*
+			 * Move up one level to resume with the next
+			 * child clock of the parent.
+			 */
+			clk = parent;
+			parent = clk->parent;
+			indent--;
+		}
+	}
+}
+
+void clk_print_tree(void)
+{
+	if (IS_ENABLED(CFG_DRIVERS_CLK_PRINT_TREE)) {
+		IMSG("Clock tree summary (informative):");
+		print_tree();
+	}
+}
+
+TEE_Result clk_save_context(void)
+{
+	struct clk *clk = NULL;
+	TEE_Result res = TEE_ERROR_GENERIC;
+
+	SLIST_FOREACH(clk, &clock_list, link) {
+		if (clk->ops && clk->ops->save_context) {
+			res = clk->ops->save_context(clk);
+			if (res) {
+				EMSG("Failed to save context of %s", clk->name);
+				return res;
+			}
+		}
+	}
+
+	return TEE_SUCCESS;
+}
+
+void clk_restore_context(void)
+{
+	struct clk *clk = NULL;
+
+	SLIST_FOREACH(clk, &clock_list, link) {
+		if (clk->ops && clk->ops->restore_context)
+			clk->ops->restore_context(clk);
+	}
 }

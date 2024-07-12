@@ -3,8 +3,8 @@
  * Copyright (c) 2015, Linaro Limited
  * Copyright (c) 2020, Arm Limited
  */
-#ifndef KERNEL_USER_TA_H
-#define KERNEL_USER_TA_H
+#ifndef __KERNEL_USER_TA_H
+#define __KERNEL_USER_TA_H
 
 #include <assert.h>
 #include <kernel/tee_ta_manager.h>
@@ -58,16 +58,33 @@ static inline struct user_ta_ctx *to_user_ta_ctx(struct ts_ctx *ctx)
 }
 
 #ifdef CFG_WITH_USER_TA
+/*
+ * Setup session context for a user TA
+ * @uuid: TA UUID
+ * @s: Session for which to setup a user TA context
+ *
+ * This function must be called with tee_ta_mutex locked.
+ */
 TEE_Result tee_ta_init_user_ta_session(const TEE_UUID *uuid,
-			struct tee_ta_session *s);
+				       struct tee_ta_session *s);
+
+/*
+ * Finalize session context initialization for a user TA
+ * @sess: Session for which to finalize user TA context
+ */
+TEE_Result tee_ta_complete_user_ta_session(struct tee_ta_session *s);
 #else
-static inline TEE_Result tee_ta_init_user_ta_session(
-			const TEE_UUID *uuid __unused,
-			struct tee_ta_session *s __unused)
+static inline TEE_Result
+tee_ta_init_user_ta_session(const TEE_UUID *uuid __unused,
+			    struct tee_ta_session *s __unused)
 {
 	return TEE_ERROR_ITEM_NOT_FOUND;
 }
-#endif
 
-
-#endif /*KERNEL_USER_TA_H*/
+static inline TEE_Result
+tee_ta_complete_user_ta_session(struct tee_ta_session *s __unused)
+{
+	return TEE_ERROR_GENERIC;
+}
+#endif /*CFG_WITH_USER_TA*/
+#endif /*__KERNEL_USER_TA_H*/

@@ -5,8 +5,8 @@
  * Copyright (c) 2020-2021, Arm Limited
  */
 
-#ifndef KERNEL_THREAD_H
-#define KERNEL_THREAD_H
+#ifndef __KERNEL_THREAD_H
+#define __KERNEL_THREAD_H
 
 #ifndef __ASSEMBLER__
 #include <types_ext.h>
@@ -16,10 +16,16 @@
 #include <util.h>
 #include <kernel/thread_arch.h>
 
+/* Copy RPC returned arguments in thread context */
 #define THREAD_FLAGS_COPY_ARGS_ON_RETURN	BIT(0)
+/* Foreign interrupt is enabled when thread issues an RPC */
 #define THREAD_FLAGS_FOREIGN_INTR_ENABLE	BIT(1)
+/* Thread issues an RPC for a foreign interrupt */
 #define THREAD_FLAGS_EXIT_ON_FOREIGN_INTR	BIT(2)
+/* Thread executes an FFA invocation */
 #define THREAD_FLAGS_FFA_ONLY			BIT(3)
+/* Thread context for powermanagement (PM) sequence */
+#define THREAD_FLAGS_PM_SEQUENCE		BIT(4)
 
 #define THREAD_ID_0		0
 #define THREAD_ID_INVALID	-1
@@ -27,6 +33,8 @@
 #define THREAD_RPC_MAX_NUM_PARAMS	U(4)
 
 #ifndef __ASSEMBLER__
+
+struct optee_msg_arg;
 
 struct thread_specific_data {
 	TAILQ_HEAD(, ts_session) sess_stack;
@@ -111,6 +119,11 @@ short int thread_get_id(void);
  * Returns current thread id, return -1 on failure.
  */
 short int thread_get_id_may_fail(void);
+
+/*
+ * Returns true if the thread is for used for PM, false otherwise.
+ */
+bool thread_is_for_pm(void);
 
 /* Returns Thread Specific Data (TSD) pointer. */
 struct thread_specific_data *thread_get_tsd(void);
@@ -340,6 +353,28 @@ struct thread_param {
 uint32_t thread_rpc_cmd(uint32_t cmd, size_t num_params,
 		struct thread_param *params);
 
+/*
+ * Prepare execution context for an Ocall thread.
+ * @rpc_arg: Output context to be provided back to thread_rpc_ocall2_unprepare()
+ */
+TEE_Result thread_rpc_ocall2_prepare(struct optee_msg_arg **rpc_arg);
+
+/*
+ * Restore execution context when terminating an Ocall thread.
+ * @rpc_arg: Input context got from thread_rpc_ocall2_prepare()
+ */
+void thread_rpc_ocall2_unprepare(struct optee_msg_arg *rpc_arg);
+
+/**
+ * Does an Ocall2 RPC using only 2 in/out parameters passed with CPU registers
+ * @param1: in/out first parameter
+ * @param2: in/out second parameter
+ * @returns 0 upon success, 1 upon failure
+ *
+ * Upon failure first parameter value is 0 (OPTEE_RPC_OCALL2_OUT_PARAM1_ERROR).
+ */
+uint32_t thread_rpc_ocall2_cmd(uint32_t param[2]);
+
 /**
  * Allocate data for payload buffers.
  * Buffer is exported to user mode applications.
@@ -396,4 +431,4 @@ void *thread_rpc_shm_cache_alloc(enum thread_shm_cache_user user,
 
 #endif /*__ASSEMBLER__*/
 
-#endif /*KERNEL_THREAD_H*/
+#endif /*__KERNEL_THREAD_H*/

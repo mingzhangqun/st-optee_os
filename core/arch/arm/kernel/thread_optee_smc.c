@@ -80,6 +80,29 @@ uint32_t thread_handle_std_smc(uint32_t a0, uint32_t a1, uint32_t a2,
 	return rv;
 }
 
+#ifdef ARM32
+uint32_t thread_handle_pm(uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3,
+			  uint32_t a4, uint32_t a5 __unused, uint32_t pc,
+			  uint32_t a7)
+{
+	thread_check_canaries();
+
+	if (IS_ENABLED(CFG_NS_VIRTUALIZATION) && virt_set_guest(a7))
+		return OPTEE_SMC_RETURN_ENOTAVAIL;
+
+	/*
+	 * thread_pm_alloc_and_run() only return on error.
+	 * Successful return is done via thread_exit().
+	 */
+	thread_pm_alloc_and_run(a0, a1, a2, a3, a4, pc);
+
+	if (IS_ENABLED(CFG_NS_VIRTUALIZATION))
+		virt_unset_guest();
+
+	return OPTEE_SMC_RETURN_ETHREAD_LIMIT;
+}
+#endif
+
 /**
  * Free physical memory previously allocated with thread_rpc_alloc_arg()
  *
@@ -300,6 +323,22 @@ uint32_t __weak __thread_std_smc_entry(uint32_t a0, uint32_t a1, uint32_t a2,
 		virt_on_stdcall();
 
 	return std_smc_entry(a0, a1, a2, a3);
+}
+
+/*
+ * Helper routine for the assembly function thread_pm_entry()
+ *
+ * Note: this function is weak just to make it possible to exclude it from
+ * the unpaged area.
+ */
+uint32_t __weak __thread_pm_entry(uint32_t a0, uint32_t a1, uint32_t a2,
+				  uint32_t a3, uint32_t a4 __unused,
+				  uint32_t a5)
+{
+	uint32_t (*function)(uint32_t a0, uint32_t a1, uint32_t a2,
+			     uint32_t a3) = (void *)(vaddr_t)a5;
+
+	return function(a0, a1, a2, a3);
 }
 
 bool thread_disable_prealloc_rpc_cache(uint64_t *cookie)
@@ -581,6 +620,70 @@ uint32_t thread_rpc_cmd(uint32_t cmd, size_t num_params,
 	return get_rpc_arg_res(arg, num_params, params);
 }
 
+/*
+ * The Ocall2 context setup by the Linux kernel does not provide an RPC
+ * argument reference related to memory object (struct mobj) but one will
+ * be needed if issuing a standard RPC from a RPC aware context. Therefore
+ * thread_rpc_ocall2_prepare() allocates one for the thread and
+ * thread_rpc_ocall2_unprepare() releases it and restores the original RPC
+ * argument reference in the thread context.
+ */
+TEE_Result thread_rpc_ocall2_prepare(struct optee_msg_arg **rpc_arg)
+{
+	struct thread_ctx *thr = threads + thread_get_id();
+
+	if (!thr->rpc_mobj) {
+		size_t sz = OPTEE_MSG_GET_ARG_SIZE(THREAD_RPC_MAX_NUM_PARAMS);
+		struct mobj *new_rpc_mobj = NULL;
+		struct optee_msg_arg *new_rpc_arg = NULL;
+
+		new_rpc_mobj = thread_rpc_alloc_arg(sz);
+		if (!new_rpc_mobj)
+			return TEE_ERROR_OUT_OF_MEMORY;
+
+		new_rpc_arg = mobj_get_va(new_rpc_mobj, 0, sz);
+		if (!new_rpc_arg) {
+			thread_rpc_free_arg(mobj_get_cookie(new_rpc_mobj));
+			return TEE_ERROR_OUT_OF_MEMORY;
+		}
+
+		*rpc_arg = thr->rpc_arg;
+		thr->rpc_arg = new_rpc_arg;
+		thr->rpc_mobj = new_rpc_mobj;
+	}
+
+	return TEE_SUCCESS;
+}
+
+void thread_rpc_ocall2_unprepare(struct optee_msg_arg *rpc_arg)
+{
+	if (rpc_arg) {
+		struct thread_ctx *thr = threads + thread_get_id();
+
+		thread_rpc_free_arg(mobj_get_cookie(thr->rpc_mobj));
+		thr->rpc_arg = rpc_arg;
+		thr->rpc_mobj = NULL;
+	}
+}
+
+uint32_t thread_rpc_ocall2_cmd(uint32_t param[2])
+{
+	uint32_t rpc_args[THREAD_RPC_NUM_ARGS] = {
+		OPTEE_SMC_RETURN_RPC_OCALL2,
+		param[0], param[1],
+	};
+
+	thread_rpc(rpc_args);
+
+	param[0] = rpc_args[0];
+	param[1] = rpc_args[1];
+
+	if (rpc_args[0] == OPTEE_RPC_OCALL2_OUT_PARAM1_ERROR)
+		return 1;
+	else
+		return 0;
+}
+
 /**
  * Free physical memory previously allocated with thread_rpc_alloc()
  *
@@ -694,13 +797,16 @@ struct mobj *thread_rpc_alloc_kernel_payload(size_t size)
 
 void thread_rpc_free_kernel_payload(struct mobj *mobj)
 {
-	thread_rpc_free(OPTEE_RPC_SHM_TYPE_KERNEL, mobj_get_cookie(mobj), mobj);
+	if (mobj)
+		thread_rpc_free(OPTEE_RPC_SHM_TYPE_KERNEL,
+				mobj_get_cookie(mobj), mobj);
 }
 
 void thread_rpc_free_payload(struct mobj *mobj)
 {
-	thread_rpc_free(OPTEE_RPC_SHM_TYPE_APPL, mobj_get_cookie(mobj),
-			mobj);
+	if (mobj)
+		thread_rpc_free(OPTEE_RPC_SHM_TYPE_APPL, mobj_get_cookie(mobj),
+				mobj);
 }
 
 struct mobj *thread_rpc_alloc_global_payload(size_t size)

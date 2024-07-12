@@ -9,6 +9,13 @@
 #include <types_ext.h>
 #include <kernel/interrupt.h>
 
+/* Constants to categorize priorities */
+#define GIC_HIGHEST_SEC_PRIORITY	0x0U
+#define GIC_LOWEST_SEC_PRIORITY		0x7fU
+#define GIC_HIGHEST_NS_PRIORITY		0x80U
+#define GIC_LOWEST_NS_PRIORITY		0xfeU
+/* 0xff would disable all interrupts */
+
 #if defined(CFG_ARM_GICV3)
 #define GIC_DIST_REG_SIZE	0x10000
 #define GIC_CPU_REG_SIZE	0x10000
@@ -37,4 +44,10 @@ void gic_cpu_init(void);
 
 /* Print GIC state to console */
 void gic_dump_state(void);
+
+/* Set the Priority Mask Regarding and return its previous value */
+uint8_t gic_set_pmr(uint8_t mask);
+
+/* Set the targe tinterrupt priority mask and return its previous value */
+uint8_t gic_set_ipriority(size_t it, uint8_t mask);
 #endif /*__DRIVERS_GIC_H*/

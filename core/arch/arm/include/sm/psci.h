@@ -1,3 +1,10 @@
+/* SPDX-License-Identifier: BSD-2-Clause */
+/*
+ * Copyright (c) 2017-2023, Linaro Limited
+ */
+#ifndef __SM_PSCI_H
+#define __SM_PSCI_H
+
 #include <kernel/thread.h>
 #include <sm/sm.h>
 #include <stdint.h>
@@ -76,6 +83,9 @@ int psci_system_suspend(uintptr_t entry, uint32_t context_id,
 			struct sm_nsec_ctx *nsec);
 int psci_stat_residency(uint32_t cpu_id, uint32_t power_state);
 int psci_stat_count(uint32_t cpu_id, uint32_t power_state);
-void tee_psci_handler(struct thread_smc_args *args, struct sm_nsec_ctx *nsec);
+uint32_t tee_psci_handler(struct thread_smc_args *args,
+			  struct sm_nsec_ctx *nsec,
+			  uint32_t *thread_pm_handler);
 
 void psci_armv7_cpu_off(void);
+#endif /* __SM_PSCI_H */

@@ -82,7 +82,6 @@ include core/core.mk
 ta-targets ?= invalid
 $(call force,default-user-ta-target,$(firstword $(ta-targets)))
 
-ifeq ($(CFG_WITH_USER_TA),y)
 include ldelf/ldelf.mk
 define build-ta-target
 ta-target := $(1)
@@ -90,6 +89,7 @@ include ta/ta.mk
 endef
 $(foreach t, $(ta-targets), $(eval $(call build-ta-target, $(t))))
 
+ifeq ($(CFG_WITH_USER_TA),y)
 # Build user TAs included in this git
 ifeq ($(CFG_BUILD_IN_TREE_TA),y)
 define build-user-ta
@@ -109,6 +109,7 @@ clean:
 	${q}dirs="$(call cleandirs-for-rmdir)"; if [ "$$dirs" ]; then $(RMDIR) $$dirs; fi
 	@if [ "$(out-dir)" != "$(O)" ]; then $(cmd-echo-silent) '  CLEAN   $(O)'; fi
 	${q}if [ -d "$(O)" ]; then $(RMDIR) $(O); fi
+	${q}rm -f compile_commands.json
 
 .PHONY: cscope
 cscope:

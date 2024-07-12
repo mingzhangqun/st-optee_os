@@ -7,20 +7,32 @@
 #include <boot_api.h>
 #include <config.h>
 #include <console.h>
+#include <drivers/clk_dt.h>
+#include <drivers/counter.h>
+#include <drivers/firewall_device.h>
 #include <drivers/gic.h>
 #include <drivers/pinctrl.h>
+#include <drivers/stm32_bsec.h>
 #include <drivers/stm32_etzpc.h>
 #include <drivers/stm32_gpio.h>
-#include <drivers/stm32_iwdg.h>
 #include <drivers/stm32_tamp.h>
 #include <drivers/stm32_uart.h>
-#include <drivers/stm32mp1_etzpc.h>
 #include <drivers/stm32mp_dt_bindings.h>
+#include <drivers/stm32mp1_pwr.h>
+#ifdef CFG_STM32MP15
+#include <drivers/stm32mp1_rcc.h>
+#endif
+#ifdef CFG_STM32MP13
+#include <drivers/stm32mp13_rcc.h>
+#endif
 #include <io.h>
 #include <kernel/boot.h>
+#include <kernel/delay.h>
 #include <kernel/dt.h>
+#include <kernel/dt_driver.h>
 #include <kernel/misc.h>
 #include <kernel/panic.h>
+#include <kernel/pm.h>
 #include <kernel/spinlock.h>
 #include <kernel/tee_misc.h>
 #include <mm/core_memprot.h>
@@ -29,6 +41,7 @@
 #include <stm32_util.h>
 #include <string.h>
 #include <trace.h>
+#include <util.h>
 
 register_phys_mem_pgdir(MEM_AREA_IO_NSEC, APB1_BASE, APB1_SIZE);
 register_phys_mem_pgdir(MEM_AREA_IO_NSEC, APB2_BASE, APB2_SIZE);
@@ -45,11 +58,20 @@ register_phys_mem_pgdir(MEM_AREA_IO_SEC, APB5_BASE, APB5_SIZE);
 #ifdef CFG_STM32MP13
 register_phys_mem_pgdir(MEM_AREA_IO_SEC, APB6_BASE, APB6_SIZE);
 #endif
+register_phys_mem_pgdir(MEM_AREA_IO_SEC, AHB2_BASE, AHB2_SIZE);
 register_phys_mem_pgdir(MEM_AREA_IO_SEC, AHB4_BASE, AHB4_SIZE);
 register_phys_mem_pgdir(MEM_AREA_IO_SEC, AHB5_BASE, AHB5_SIZE);
 register_phys_mem_pgdir(MEM_AREA_IO_SEC, GIC_BASE, GIC_SIZE);
 
 register_ddr(DDR_BASE, CFG_DRAM_SIZE);
+
+/* Map non-secure DDR bottom for the low power sequence */
+register_phys_mem(MEM_AREA_RAM_NSEC, DDR_BASE, SMALL_PAGE_SIZE);
+
+#ifdef CFG_STM32MP15
+/* Map TEE physical RAM as read-only for content storage when suspending */
+register_phys_mem(MEM_AREA_ROM_SEC, TEE_RAM_START, TEE_RAM_PH_SIZE);
+#endif /* CFG_STM32MP15 */
 
 #define _ID2STR(id)		(#id)
 #define ID2STR(id)		_ID2STR(id)
@@ -59,6 +81,7 @@ static TEE_Result platform_banner(void)
 	IMSG("Platform stm32mp1: flavor %s - DT %s",
 		ID2STR(PLATFORM_FLAVOR),
 		ID2STR(CFG_EMBED_DTB_SOURCE_FILE));
+	IMSG("OP-TEE ST profile: %s", TO_STR(CFG_STM32MP_PROFILE));
 
 	return TEE_SUCCESS;
 }
@@ -76,7 +99,11 @@ service_init(platform_banner);
  */
 static struct stm32_uart_pdata console_data;
 
-void console_init(void)
+/*
+ * Note: this function is weak just to make it possible to exclude it from
+ * the unpaged area.
+ */
+void __weak console_init(void)
 {
 	/* Early console initialization before MMU setup */
 	struct uart {
@@ -110,43 +137,52 @@ void console_init(void)
 	IMSG("Early console on UART#%u", CFG_STM32_EARLY_CONSOLE_UART);
 }
 
-static TEE_Result init_console_from_dt(void)
+static uintptr_t stm32_dbgmcu_base(void)
 {
-	struct stm32_uart_pdata *pd = NULL;
-	void *fdt = NULL;
-	int node = 0;
-	TEE_Result res = TEE_ERROR_GENERIC;
+	static void *va;
 
-	fdt = get_embedded_dt();
-	res = get_console_node_from_dt(fdt, &node, NULL, NULL);
-	if (res == TEE_ERROR_ITEM_NOT_FOUND) {
-		fdt = get_external_dt();
-		res = get_console_node_from_dt(fdt, &node, NULL, NULL);
-		if (res == TEE_ERROR_ITEM_NOT_FOUND)
-			return TEE_SUCCESS;
-		if (res != TEE_SUCCESS)
-			return res;
-	}
+	if (!cpu_mmu_enabled())
+		return DBGMCU_BASE;
 
-	pd = stm32_uart_init_from_dt_node(fdt, node);
-	if (!pd) {
-		IMSG("DTB disables console");
-		register_serial_console(NULL);
-		return TEE_SUCCESS;
-	}
+	if (!va)
+		va = phys_to_virt(DBGMCU_BASE, MEM_AREA_IO_SEC, 1);
 
-	/* Replace early console with the new one */
-	console_flush();
-	console_data = *pd;
-	register_serial_console(&console_data.chip);
-	IMSG("DTB enables console (%ssecure)", pd->secure ? "" : "non-");
-	free(pd);
+	return (uintptr_t)va;
+}
+
+/* SoC versioning util, returns default ID if can't access DBGMCU */
+TEE_Result stm32mp1_dbgmcu_get_chip_version(uint32_t *chip_version)
+{
+	uint32_t id = STM32MP1_CHIP_DEFAULT_VERSION;
+
+	if (!chip_version)
+		return TEE_ERROR_BAD_PARAMETERS;
+
+	if (stm32_bsec_read_debug_conf() & BSEC_DBGSWGEN)
+		id = (io_read32(stm32_dbgmcu_base() + DBGMCU_IDC) &
+		      DBGMCU_IDC_REV_ID_MASK) >> DBGMCU_IDC_REV_ID_SHIFT;
+
+	*chip_version = id;
 
 	return TEE_SUCCESS;
 }
 
-/* Probe console from DT once clock inits (service init level) are completed */
-service_init_late(init_console_from_dt);
+/* SoC device ID util, returns default ID if can't access DBGMCU */
+TEE_Result stm32mp1_dbgmcu_get_chip_dev_id(uint32_t *chip_dev_id)
+{
+	uint32_t id = STM32MP1_CHIP_ID;
+
+	if (!chip_dev_id)
+		return TEE_ERROR_BAD_PARAMETERS;
+
+	if (stm32_bsec_read_debug_conf() & BSEC_DBGSWGEN)
+		id = io_read32(stm32_dbgmcu_base() + DBGMCU_IDC) &
+		     DBGMCU_IDC_DEV_ID_MASK;
+
+	*chip_dev_id = id;
+
+	return TEE_SUCCESS;
+}
 
 /*
  * GIC init, used also for primary/secondary boot core wake completion
@@ -165,85 +201,8 @@ void boot_secondary_init_intc(void)
 	stm32mp_register_online_cpu();
 }
 
-#ifdef CFG_STM32MP13
-#ifdef CFG_STM32_ETZPC
-/* Configure ETZPC cell and lock it when resource is secure */
-static void config_lock_decprot(uint32_t decprot_id,
-				enum etzpc_decprot_attributes decprot_attr)
-{
-	etzpc_configure_decprot(decprot_id, decprot_attr);
-
-	if (decprot_attr == ETZPC_DECPROT_S_RW)
-		etzpc_lock_decprot(decprot_id);
-}
-
-static TEE_Result set_etzpc_secure_configuration(void)
-{
-	config_lock_decprot(STM32MP1_ETZPC_BKPSRAM_ID, ETZPC_DECPROT_S_RW);
-	config_lock_decprot(STM32MP1_ETZPC_DDRCTRLPHY_ID,
-			    ETZPC_DECPROT_NS_R_S_W);
-
-	/* Configure ETZPC with peripheral registering */
-	config_lock_decprot(STM32MP1_ETZPC_ADC1_ID, ETZPC_DECPROT_NS_RW);
-	config_lock_decprot(STM32MP1_ETZPC_ADC2_ID, ETZPC_DECPROT_NS_RW);
-	config_lock_decprot(STM32MP1_ETZPC_CRYP_ID, ETZPC_DECPROT_NS_RW);
-	config_lock_decprot(STM32MP1_ETZPC_DCMIPP_ID, ETZPC_DECPROT_NS_RW);
-	config_lock_decprot(STM32MP1_ETZPC_ETH1_ID, ETZPC_DECPROT_NS_RW);
-	config_lock_decprot(STM32MP1_ETZPC_ETH2_ID, ETZPC_DECPROT_NS_RW);
-	config_lock_decprot(STM32MP1_ETZPC_FMC_ID, ETZPC_DECPROT_NS_RW);
-	/* HASH is secure */
-	config_lock_decprot(STM32MP1_ETZPC_HASH_ID, ETZPC_DECPROT_S_RW);
-	config_lock_decprot(STM32MP1_ETZPC_I2C3_ID, ETZPC_DECPROT_NS_RW);
-	/* I2C4 is secure */
-	config_lock_decprot(STM32MP1_ETZPC_I2C4_ID, ETZPC_DECPROT_S_RW);
-	config_lock_decprot(STM32MP1_ETZPC_I2C5_ID, ETZPC_DECPROT_NS_RW);
-	/* IWDG1 is secure */
-	config_lock_decprot(STM32MP1_ETZPC_IWDG1_ID, ETZPC_DECPROT_S_RW);
-	config_lock_decprot(STM32MP1_ETZPC_LPTIM2_ID, ETZPC_DECPROT_NS_RW);
-	/* LPTIM3 is secure */
-	config_lock_decprot(STM32MP1_ETZPC_LPTIM3_ID, ETZPC_DECPROT_S_RW);
-	config_lock_decprot(STM32MP1_ETZPC_LTDC_ID, ETZPC_DECPROT_NS_RW);
-	/* MCE is secure */
-	config_lock_decprot(STM32MP1_ETZPC_MCE_ID, ETZPC_DECPROT_S_RW);
-	config_lock_decprot(STM32MP1_ETZPC_OTG_ID, ETZPC_DECPROT_NS_RW);
-	/* PKA is secure */
-	config_lock_decprot(STM32MP1_ETZPC_PKA_ID, ETZPC_DECPROT_S_RW);
-	config_lock_decprot(STM32MP1_ETZPC_QSPI_ID, ETZPC_DECPROT_NS_RW);
-	/* RNG is secure */
-	config_lock_decprot(STM32MP1_ETZPC_RNG_ID, ETZPC_DECPROT_S_RW);
-	/* SAES is secure */
-	config_lock_decprot(STM32MP1_ETZPC_SAES_ID, ETZPC_DECPROT_S_RW);
-	config_lock_decprot(STM32MP1_ETZPC_SDMMC1_ID, ETZPC_DECPROT_NS_RW);
-	config_lock_decprot(STM32MP1_ETZPC_SDMMC2_ID, ETZPC_DECPROT_NS_RW);
-	config_lock_decprot(STM32MP1_ETZPC_SPI4_ID, ETZPC_DECPROT_NS_RW);
-	config_lock_decprot(STM32MP1_ETZPC_SPI5_ID, ETZPC_DECPROT_NS_RW);
-	config_lock_decprot(STM32MP1_ETZPC_SRAM1_ID, ETZPC_DECPROT_NS_RW);
-	config_lock_decprot(STM32MP1_ETZPC_SRAM2_ID, ETZPC_DECPROT_NS_RW);
-	/* SRAM3 is secure */
-	config_lock_decprot(STM32MP1_ETZPC_SRAM3_ID, ETZPC_DECPROT_S_RW);
-	/* STGENC is secure */
-	config_lock_decprot(STM32MP1_ETZPC_STGENC_ID, ETZPC_DECPROT_S_RW);
-	/* TIM12 is secure */
-	config_lock_decprot(STM32MP1_ETZPC_TIM12_ID, ETZPC_DECPROT_S_RW);
-	config_lock_decprot(STM32MP1_ETZPC_TIM13_ID, ETZPC_DECPROT_NS_RW);
-	config_lock_decprot(STM32MP1_ETZPC_TIM14_ID, ETZPC_DECPROT_NS_RW);
-	/* TIM15 is secure */
-	config_lock_decprot(STM32MP1_ETZPC_TIM15_ID, ETZPC_DECPROT_S_RW);
-	config_lock_decprot(STM32MP1_ETZPC_TIM16_ID, ETZPC_DECPROT_NS_RW);
-	config_lock_decprot(STM32MP1_ETZPC_TIM17_ID, ETZPC_DECPROT_NS_RW);
-	config_lock_decprot(STM32MP1_ETZPC_USART1_ID, ETZPC_DECPROT_NS_RW);
-	config_lock_decprot(STM32MP1_ETZPC_USART2_ID, ETZPC_DECPROT_NS_RW);
-	config_lock_decprot(STM32MP1_ETZPC_USBPHYCTRL_ID, ETZPC_DECPROT_NS_RW);
-	config_lock_decprot(STM32MP1_ETZPC_VREFBUF_ID, ETZPC_DECPROT_NS_RW);
-
-	return TEE_SUCCESS;
-}
-
-driver_init_late(set_etzpc_secure_configuration);
-#endif /* CFG_STM32_ETZPC */
-#endif /* CFG_STM32MP13 */
-
 #ifdef CFG_STM32MP15
+#ifdef CFG_WITH_PAGER
 /*
  * This concerns OP-TEE pager for STM32MP1 to use secure internal
  * RAMs to execute. TZSRAM refers the TZSRAM_BASE/TZSRAM_SIZE
@@ -296,10 +255,6 @@ driver_init_late(set_etzpc_secure_configuration);
 #define SRAMS_START			SRAM1_BASE
 #define TZSRAM_END			(CFG_TZSRAM_START + CFG_TZSRAM_SIZE)
 
-#define SCMI_SHM_IS_IN_SRAMX	((CFG_STM32MP1_SCMI_SHM_BASE >= SRAM1_BASE) && \
-				 (CFG_STM32MP1_SCMI_SHM_BASE + \
-				  CFG_STM32MP1_SCMI_SHM_SIZE) <= SRAMS_END)
-
 #define TZSRAM_FITS_IN_SYSRAM_SEC	((CFG_TZSRAM_START >= SYSRAM_BASE) && \
 					 (TZSRAM_END <= SYSRAM_SEC_END))
 
@@ -315,7 +270,6 @@ driver_init_late(set_etzpc_secure_configuration);
 
 #define TZSRAM_IS_IN_DRAM	(CFG_TZSRAM_START >= CFG_DRAM_BASE)
 
-#ifdef CFG_WITH_PAGER
 /*
  * At build time, we enforce that, when pager is used,
  * either TZSRAM fully fits inside SYSRAM secure address range,
@@ -325,68 +279,143 @@ driver_init_late(set_etzpc_secure_configuration);
  */
 static_assert(TZSRAM_FITS_IN_SYSRAM_SEC || TZSRAM_FITS_IN_SYSRAM_AND_SRAMS ||
 	      TZSRAM_FITS_IN_SRAMS || TZSRAM_IS_IN_DRAM);
-#endif
+#endif /* CFG_WITH_PAGER */
+#endif /* CFG_STM32MP15 */
 
-#if TZSRAM_FITS_IN_SYSRAM_AND_SRAMS || TZSRAM_FITS_IN_SRAMS || \
-	SCMI_SHM_IS_IN_SRAMX
-/* At run time we enforce that SRAM1 to SRAM4 are properly assigned if used */
-static TEE_Result init_stm32mp15_secure_srams(void)
+static TEE_Result secure_pager_ram(struct dt_driver_provider *fw_provider,
+				   unsigned int decprot_id,
+				   paddr_t base, size_t secure_size)
 {
+	/* Lock firewall configuration for secure internal RAMs used by pager */
+	uint32_t query_arg = DECPROT(decprot_id, DECPROT_S_RW, DECPROT_LOCK);
+	struct firewall_query fw_query = {
+		.ctrl = dt_driver_provider_priv_data(fw_provider),
+		.args = &query_arg,
+		.arg_count = 1,
+	};
+	TEE_Result res = TEE_ERROR_GENERIC;
+	bool is_pager_ram = false;
+
+#ifdef CFG_WITH_PAGER
+	is_pager_ram = core_is_buffer_intersect(CFG_TZSRAM_START,
+						CFG_TZSRAM_SIZE,
+						base, secure_size);
+#endif
+	if (!is_pager_ram)
+		return TEE_SUCCESS;
+
+	res = firewall_set_memory_configuration(&fw_query, base, secure_size);
+	if (res)
+		EMSG("Failed to configure secure SRAM %#"PRIxPA"..%#"PRIxPA,
+		     base, base + secure_size);
+
+	return res;
+}
+
+static TEE_Result non_secure_scmi_ram(struct dt_driver_provider *fw_provider,
+				      unsigned int decprot_id,
+				      paddr_t base, size_t size)
+{
+	/* Do not lock firewall configuration for non-secure internal RAMs */
+	uint32_t query_arg = DECPROT(decprot_id, DECPROT_NS_RW, DECPROT_UNLOCK);
+	struct firewall_query fw_query = {
+		.ctrl = dt_driver_provider_priv_data(fw_provider),
+		.args = &query_arg,
+		.arg_count = 1,
+	};
+	TEE_Result res = TEE_ERROR_GENERIC;
+
+	if (!core_is_buffer_intersect(CFG_STM32MP1_SCMI_SHM_BASE,
+				      CFG_STM32MP1_SCMI_SHM_SIZE,
+				      base, size))
+		return TEE_SUCCESS;
+
+	res = firewall_set_memory_configuration(&fw_query, base, size);
+	if (res)
+		EMSG("Failed to configure non-secure SRAM %#"PRIxPA"..%#"PRIxPA,
+		     base, base + size);
+
+	return res;
+}
+
+/* At run time we enforce that SRAM1 to SRAM4 are properly assigned if used */
+static TEE_Result configure_srams(struct dt_driver_provider *fw_provider)
+{
+	bool error = false;
+
 	if (IS_ENABLED(CFG_WITH_PAGER)) {
-		if (core_is_buffer_intersect(CFG_TZSRAM_START, CFG_TZSRAM_SIZE,
-					     SRAM1_BASE, SRAM1_SIZE))
-			stm32mp_register_secure_periph_iomem(SRAM1_BASE);
+		if (secure_pager_ram(fw_provider, STM32MP1_ETZPC_SRAM1_ID,
+				     SRAM1_BASE, SRAM1_SIZE))
+			error = true;
 
-		if (core_is_buffer_intersect(CFG_TZSRAM_START, CFG_TZSRAM_SIZE,
-					     SRAM2_BASE, SRAM2_SIZE))
-			stm32mp_register_secure_periph_iomem(SRAM2_BASE);
+		if (secure_pager_ram(fw_provider, STM32MP1_ETZPC_SRAM2_ID,
+				     SRAM2_BASE, SRAM2_SIZE))
+			error = true;
 
-		if (core_is_buffer_intersect(CFG_TZSRAM_START, CFG_TZSRAM_SIZE,
-					     SRAM3_BASE, SRAM3_SIZE))
-			stm32mp_register_secure_periph_iomem(SRAM3_BASE);
+		if (secure_pager_ram(fw_provider, STM32MP1_ETZPC_SRAM3_ID,
+				     SRAM3_BASE, SRAM3_SIZE))
+			error = true;
 
-		if (core_is_buffer_intersect(CFG_TZSRAM_START, CFG_TZSRAM_SIZE,
-					     SRAM4_BASE, SRAM4_SIZE))
-			stm32mp_register_secure_periph_iomem(SRAM4_BASE);
+#ifdef CFG_STM32MP15
+		if (secure_pager_ram(fw_provider, STM32MP1_ETZPC_SRAM4_ID,
+				     SRAM4_BASE, SRAM4_SIZE))
+			error = true;
+#endif
 	}
 
-	if (SCMI_SHM_IS_IN_SRAMX) {
-		if (core_is_buffer_intersect(CFG_STM32MP1_SCMI_SHM_BASE,
-					     CFG_STM32MP1_SCMI_SHM_SIZE,
-					     SRAM1_BASE, SRAM1_SIZE))
-			stm32mp_register_non_secure_periph_iomem(SRAM1_BASE);
+	if (CFG_STM32MP1_SCMI_SHM_BASE) {
+		if (non_secure_scmi_ram(fw_provider, STM32MP1_ETZPC_SRAM1_ID,
+					SRAM1_BASE, SRAM1_SIZE))
+			error = true;
 
-		if (core_is_buffer_intersect(CFG_STM32MP1_SCMI_SHM_BASE,
-					     CFG_STM32MP1_SCMI_SHM_SIZE,
-					     SRAM2_BASE, SRAM2_SIZE))
-			stm32mp_register_non_secure_periph_iomem(SRAM2_BASE);
+		if (non_secure_scmi_ram(fw_provider, STM32MP1_ETZPC_SRAM2_ID,
+					SRAM2_BASE, SRAM2_SIZE))
+			error = true;
 
-		if (core_is_buffer_intersect(CFG_STM32MP1_SCMI_SHM_BASE,
-					     CFG_STM32MP1_SCMI_SHM_SIZE,
-					     SRAM3_BASE, SRAM3_SIZE))
-			stm32mp_register_non_secure_periph_iomem(SRAM3_BASE);
+		if (non_secure_scmi_ram(fw_provider, STM32MP1_ETZPC_SRAM3_ID,
+					SRAM3_BASE, SRAM3_SIZE))
+			error = true;
 
-		if (core_is_buffer_intersect(CFG_STM32MP1_SCMI_SHM_BASE,
-					     CFG_STM32MP1_SCMI_SHM_SIZE,
-					     SRAM4_BASE, SRAM4_SIZE))
-			stm32mp_register_non_secure_periph_iomem(SRAM4_BASE);
+#ifdef CFG_STM32MP15
+		if (non_secure_scmi_ram(fw_provider, STM32MP1_ETZPC_SRAM4_ID,
+					SRAM4_BASE, SRAM4_SIZE))
+			error = true;
+#endif
 	}
+
+	if (error)
+		panic();
 
 	return TEE_SUCCESS;
 }
 
-service_init_late(init_stm32mp15_secure_srams);
-#endif /* TZSRAM_FITS_IN_SYSRAM_AND_SRAMS || TZSRAM_FITS_IN_SRAMS */
-#endif /* CFG_STM32MP15 && CFG_TZSRAM_START */
-
 static TEE_Result init_stm32mp1_drivers(void)
 {
-	/* Secure internal memories for the platform, once ETZPC is ready */
-	etzpc_configure_tzma(0, ETZPC_TZMA_ALL_SECURE);
-	etzpc_lock_tzma(0);
+	struct dt_driver_provider *prov = NULL;
+	TEE_Result res = TEE_ERROR_GENERIC;
+	uint32_t query_arg[1] = { };
+	struct firewall_query firewall = {
+		.args = query_arg,
+		.arg_count = 1,
+	};
+	int node = 0;
 
-	etzpc_configure_tzma(1, SYSRAM_SEC_SIZE >> SMALL_PAGE_SHIFT);
-	etzpc_lock_tzma(1);
+	node = fdt_node_offset_by_compatible(get_embedded_dt(), -1,
+					     "st,stm32-etzpc");
+	if (node < 0)
+		panic("Could not get ETZPC node");
+
+	prov = dt_driver_get_provider_by_node(node, DT_DRIVER_FIREWALL);
+	assert(prov);
+
+	firewall.ctrl = dt_driver_provider_priv_data(prov);
+
+	/* Secure SYSRAM */
+	*query_arg = ETZPC_TZMA1_ID;
+	res = firewall_set_memory_configuration(&firewall, SYSRAM_BASE,
+						SYSRAM_SEC_SIZE);
+	if (res)
+		panic("Unable to secure SYSRAM");
 
 	if (SYSRAM_SIZE > SYSRAM_SEC_SIZE) {
 		size_t nsec_size = SYSRAM_SIZE - SYSRAM_SEC_SIZE;
@@ -400,35 +429,13 @@ static TEE_Result init_stm32mp1_drivers(void)
 		memset(va, 0, nsec_size);
 	}
 
-	return TEE_SUCCESS;
-}
-
-service_init_late(init_stm32mp1_drivers);
-
-static TEE_Result init_late_stm32mp1_drivers(void)
-{
-	TEE_Result res = TEE_ERROR_GENERIC;
-
-	/* Set access permission to TAM backup registers */
-	if (IS_ENABLED(CFG_STM32_TAMP)) {
-		struct stm32_bkpregs_conf conf = {
-			.nb_zone1_regs = TAMP_BKP_REGISTER_ZONE1_COUNT,
-			.nb_zone2_regs = TAMP_BKP_REGISTER_ZONE2_COUNT,
-		};
-
-		res = stm32_tamp_set_secure_bkpregs(&conf);
-		if (res == TEE_ERROR_DEFER_DRIVER_INIT) {
-			/* TAMP driver was not probed if disabled in the DT */
-			res = TEE_SUCCESS;
-		}
-		if (res)
-			panic();
-	}
+	/* Configure SRAMx secure hardening */
+	configure_srams(prov);
 
 	return TEE_SUCCESS;
 }
 
-driver_init_late(init_late_stm32mp1_drivers);
+driver_init_late(init_stm32mp1_drivers);
 
 vaddr_t stm32_rcc_base(void)
 {
@@ -444,16 +451,11 @@ vaddr_t get_gicd_base(void)
 	return io_pa_or_va_secure(&base, 1);
 }
 
-void stm32mp_get_bsec_static_cfg(struct stm32_bsec_static_cfg *cfg)
+void plat_bsec_get_static_cfg(struct stm32_bsec_static_cfg *cfg)
 {
 	cfg->base = BSEC_BASE;
 	cfg->upper_start = STM32MP1_UPPER_OTP_START;
 	cfg->max_id = STM32MP1_OTP_MAX_ID;
-}
-
-bool __weak stm32mp_with_pmic(void)
-{
-	return false;
 }
 
 uint32_t may_spin_lock(unsigned int *lock)
@@ -489,6 +491,20 @@ vaddr_t stm32mp_bkpreg(unsigned int idx)
 	return bkpreg_base() + (idx * sizeof(uint32_t));
 }
 
+vaddr_t stm32mp_bkpsram_base(void)
+{
+	struct io_pa_va base = { .pa = BKPSRAM_BASE };
+
+	return io_pa_or_va(&base, BKPSRAM_SIZE);
+}
+
+vaddr_t stm32mp_stgen_base(void)
+{
+	struct io_pa_va base = { .pa = STGEN_BASE };
+
+	return io_pa_or_va(&base, 1);
+}
+
 static bool __maybe_unused bank_is_valid(unsigned int bank)
 {
 	if (IS_ENABLED(CFG_STM32MP15))
@@ -499,56 +515,6 @@ static bool __maybe_unused bank_is_valid(unsigned int bank)
 
 	panic();
 }
-
-unsigned int stm32_get_gpio_bank_offset(unsigned int bank)
-{
-	assert(bank_is_valid(bank));
-
-	if (bank == GPIO_BANK_Z)
-		return 0;
-
-	return bank * GPIO_BANK_OFFSET;
-}
-
-#ifdef CFG_STM32_IWDG
-TEE_Result stm32_get_iwdg_otp_config(paddr_t pbase,
-				     struct stm32_iwdg_otp_data *otp_data)
-{
-	unsigned int idx = 0;
-	uint32_t otp_id = 0;
-	size_t bit_len = 0;
-	uint8_t bit_offset = 0;
-	uint32_t otp_value = 0;
-
-	switch (pbase) {
-	case IWDG1_BASE:
-		idx = 0;
-		break;
-	case IWDG2_BASE:
-		idx = 1;
-		break;
-	default:
-		panic();
-	}
-
-	if (stm32_bsec_find_otp_in_nvmem_layout("hw2_otp", &otp_id, &bit_offset,
-						&bit_len) ||
-	    bit_len != 32 || bit_offset != 0)
-		panic();
-
-	if (stm32_bsec_read_otp(&otp_value, otp_id))
-		panic();
-
-	otp_data->hw_enabled = otp_value &
-			       BIT(idx + HW2_OTP_IWDG_HW_ENABLE_SHIFT);
-	otp_data->disable_on_stop = otp_value &
-				    BIT(idx + HW2_OTP_IWDG_FZ_STOP_SHIFT);
-	otp_data->disable_on_standby = otp_value &
-				       BIT(idx + HW2_OTP_IWDG_FZ_STANDBY_SHIFT);
-
-	return TEE_SUCCESS;
-}
-#endif /*CFG_STM32_IWDG*/
 
 #ifdef CFG_STM32_DEBUG_ACCESS
 static TEE_Result init_debug(void)
@@ -563,7 +529,7 @@ static TEE_Result init_debug(void)
 		return res;
 
 	if (state != BSEC_STATE_SEC_CLOSED && conf) {
-		if (IS_ENABLED(CFG_WARN_INSECURE))
+		if (IS_ENABLED(CFG_INSECURE))
 			IMSG("WARNING: All debug accesses are allowed");
 
 		res = stm32_bsec_write_debug_conf(conf | BSEC_DEBUG_ALL);
@@ -584,3 +550,396 @@ early_init_late(init_debug);
 
 /* Some generic resources need to be unpaged */
 DECLARE_KEEP_PAGER(pinctrl_apply_state);
+
+static int get_chip_dev_id(uint32_t *dev_id)
+{
+#ifdef CFG_STM32MP13
+	*dev_id = stm32mp_syscfg_get_chip_dev_id();
+#else /* assume CFG_STM32MP15 */
+	if (stm32mp1_dbgmcu_get_chip_dev_id(dev_id) != TEE_SUCCESS)
+		return -1;
+#endif
+	return 0;
+}
+
+static int get_part_number(uint32_t *part_nb)
+{
+	static uint32_t part_number;
+	uint32_t dev_id = 0;
+	uint32_t otp = 0;
+	size_t bit_len = 0;
+
+	assert(part_nb);
+
+	if (part_number) {
+		*part_nb = part_number;
+		return 0;
+	}
+
+	if (get_chip_dev_id(&dev_id) < 0)
+		return -1;
+
+	if (stm32_bsec_find_otp_in_nvmem_layout("part_number_otp",
+						&otp, NULL, &bit_len))
+		return -1;
+
+	if (stm32_bsec_read_otp(&part_number, otp))
+		return -1;
+
+	part_number = (part_number & GENMASK_32(bit_len, 0));
+
+	part_number = part_number | (dev_id << 16);
+
+	*part_nb = part_number;
+
+	return 0;
+}
+
+bool stm32mp_supports_cpu_opp(uint32_t opp_id)
+{
+	uint32_t part_number = 0;
+	uint32_t id = 0;
+
+	if (get_part_number(&part_number)) {
+		DMSG("Cannot get part number\n");
+		panic();
+	}
+
+	switch (part_number) {
+#ifdef CFG_STM32MP13
+	case STM32MP135F_PART_NB:
+	case STM32MP135D_PART_NB:
+	case STM32MP133F_PART_NB:
+	case STM32MP133D_PART_NB:
+	case STM32MP131F_PART_NB:
+	case STM32MP131D_PART_NB:
+#endif
+#ifdef CFG_STM32MP15
+	case STM32MP157F_PART_NB:
+	case STM32MP157D_PART_NB:
+	case STM32MP153F_PART_NB:
+	case STM32MP153D_PART_NB:
+	case STM32MP151F_PART_NB:
+	case STM32MP151D_PART_NB:
+#endif
+		id = BIT(1);
+		break;
+	default:
+		id = BIT(0);
+		break;
+	}
+
+	return (opp_id & id) == id;
+}
+
+bool stm32mp_supports_hw_cryp(void)
+{
+	uint32_t part_number = 0;
+
+	if (!IS_ENABLED(CFG_STM32_CRYP))
+		return false;
+
+	if (get_part_number(&part_number)) {
+		DMSG("Cannot get part number\n");
+		panic();
+	}
+
+	switch (part_number) {
+#ifdef CFG_STM32MP13
+	case STM32MP135F_PART_NB:
+	case STM32MP135C_PART_NB:
+	case STM32MP133F_PART_NB:
+	case STM32MP133C_PART_NB:
+	case STM32MP131F_PART_NB:
+	case STM32MP131C_PART_NB:
+		return true;
+#endif
+#ifdef CFG_STM32MP15
+	case STM32MP157F_PART_NB:
+	case STM32MP157C_PART_NB:
+	case STM32MP153F_PART_NB:
+	case STM32MP153C_PART_NB:
+	case STM32MP151F_PART_NB:
+	case STM32MP151C_PART_NB:
+		return true;
+#endif
+	default:
+		return false;
+	}
+}
+
+bool stm32mp_supports_second_core(void)
+{
+	uint32_t __maybe_unused part_number = 0;
+
+	if (IS_ENABLED(CFG_STM32MP13))
+		return false;
+
+	if (CFG_TEE_CORE_NB_CORE == 1)
+		return false;
+
+	if (get_part_number(&part_number)) {
+		DMSG("Cannot get part number\n");
+		panic();
+	}
+
+	switch (part_number) {
+#ifdef CFG_STM32MP15
+	case STM32MP151F_PART_NB:
+	case STM32MP151D_PART_NB:
+	case STM32MP151C_PART_NB:
+	case STM32MP151A_PART_NB:
+		return false;
+#endif
+	default:
+		return true;
+	}
+}
+
+#define ARM_CNTXCTL_IMASK	BIT(1)
+
+static void stm32mp_mask_timer(void)
+{
+	/* Mask timer interrupts */
+	write_cntp_ctl(read_cntp_ctl() | ARM_CNTXCTL_IMASK);
+	write_cntv_ctl(read_cntv_ctl() | ARM_CNTXCTL_IMASK);
+}
+
+void __noreturn do_reset(const char *str __maybe_unused)
+{
+	stm32mp_mask_timer();
+
+	if (stm32mp_supports_second_core()) {
+		uint32_t target_mask = 0;
+
+		if (get_core_pos() == 0)
+			target_mask = TARGET_CPU1_GIC_MASK;
+		else
+			target_mask = TARGET_CPU0_GIC_MASK;
+
+		interrupt_raise_sgi(interrupt_get_main_chip(),
+				    CFG_HALT_CORES_ON_PANIC_SGI,
+				    target_mask);
+		/* wait than other core is halted */
+		mdelay(1);
+	}
+	IMSG("Forced system reset %s", str);
+	console_flush();
+	stm32_reset_system();
+	udelay(100);
+	panic();
+}
+
+#ifdef CFG_STM32_HSE_MONITORING
+/* pourcent rate of hse alarm */
+#define HSE_ALARM_PERCENT	110
+#define FREQ_MONITOR_COMPAT	"st,freq-monitor"
+
+struct stm32_hse_monitoring_data {
+	struct counter_device *counter;
+	void *config;
+};
+
+static void stm32_hse_over_frequency(uint32_t ticks __unused,
+				     void *user_data __unused)
+{
+	EMSG("HSE over frequency: nb ticks:%"PRIu32, ticks);
+}
+DECLARE_KEEP_PAGER(stm32_hse_over_frequency);
+
+static TEE_Result stm32_hse_monitoring_pm(enum pm_op op,
+					  unsigned int pm_hint __unused,
+					  const struct pm_callback_handle *h)
+{
+	struct stm32_hse_monitoring_data *priv =
+	(struct stm32_hse_monitoring_data *)PM_CALLBACK_GET_HANDLE(h);
+
+	if (op == PM_OP_RESUME) {
+		counter_start(priv->counter, priv->config);
+		counter_set_alarm(priv->counter);
+	} else {
+		counter_cancel_alarm(priv->counter);
+		counter_stop(priv->counter);
+	}
+
+	return TEE_SUCCESS;
+}
+
+static TEE_Result stm32_hse_monitoring(void)
+{
+	struct stm32_hse_monitoring_data *priv = NULL;
+	struct counter_device *counter = NULL;
+	struct clk *hse_clk = NULL;
+	struct clk *hsi_clk = NULL;
+	unsigned long hse = 0;
+	unsigned long hsi_cal = 0;
+	uint32_t ticks = 0;
+	void *fdt = NULL;
+	void *config = NULL;
+	int node = -1;
+	TEE_Result res = TEE_ERROR_GENERIC;
+
+	priv = calloc(1, sizeof(*priv));
+	if (!priv)
+		return TEE_ERROR_OUT_OF_MEMORY;
+
+	fdt = get_embedded_dt();
+	if (!fdt)
+		panic();
+
+	node = fdt_node_offset_by_compatible(fdt, 0, FREQ_MONITOR_COMPAT);
+	if (node == -FDT_ERR_NOTFOUND)
+		return TEE_SUCCESS;
+	if (node < 0)
+		panic();
+
+	if (fdt_get_status(fdt, node) == DT_STATUS_DISABLED)
+		return TEE_SUCCESS;
+
+	res = clk_dt_get_by_name(fdt, node, "hse", &hse_clk);
+	if  (res)
+		return res;
+
+	res = clk_dt_get_by_name(fdt, node, "hsi", &hsi_clk);
+	if  (res)
+		return res;
+
+	hse = clk_get_rate(hse_clk);
+	hsi_cal = clk_get_rate(hsi_clk);
+	/*
+	 * hsi_cal is based on hsi & DIVISOR
+	 * DIVISOR is fixed, (stm32mp13:1024)
+	 */
+	hsi_cal /= 1024;
+
+	ticks = (hse / 100) * HSE_ALARM_PERCENT;
+	ticks /= hsi_cal;
+
+	DMSG("HSE:%luHz HSI cal:%luHz alarm:%"PRIu32, hse, hsi_cal, ticks);
+
+	counter = fdt_counter_get(fdt, node, &config);
+	assert(counter && config);
+
+	counter->alarm.callback = stm32_hse_over_frequency;
+	counter->alarm.ticks = ticks;
+
+	priv->counter = counter;
+	priv->config = config;
+
+	register_pm_core_service_cb(stm32_hse_monitoring_pm, priv,
+				    "stm32-hse-monitoring");
+
+	counter_start(counter, config);
+	counter_set_alarm(counter);
+
+	return TEE_SUCCESS;
+}
+
+driver_init_late(stm32_hse_monitoring);
+#endif /* CFG_STM32_HSE_MONITORING */
+
+/* Activate the SoC resources required by internal TAMPER */
+TEE_Result stm32_activate_internal_tamper(int id)
+{
+	TEE_Result res = TEE_ERROR_NOT_SUPPORTED;
+
+	switch (id) {
+	case INT_TAMP1: /* RTC/backup power domain voltage monitoring */
+	case INT_TAMP2: /* Temperature monitoring */
+		stm32mp_pwr_monitoring_enable();
+		res = TEE_SUCCESS;
+		break;
+
+	case INT_TAMP3: /* LSE monitoring (LSECSS) */
+		if (io_read32(stm32_rcc_base() + RCC_BDCR) & RCC_BDCR_LSECSSON)
+			res = TEE_SUCCESS;
+		break;
+
+	case INT_TAMP4: /* HSE monitoring (HSECSS) */
+		if (io_read32(stm32_rcc_base() + RCC_OCENSETR) &
+		    RCC_OCENR_HSECSSON)
+			res = TEE_SUCCESS;
+		break;
+
+#ifdef CFG_STM32MP13
+	case INT_TAMP5:
+	case INT_TAMP6:
+	case INT_TAMP7:
+	case INT_TAMP8:
+	case INT_TAMP9:
+	case INT_TAMP10:
+	case INT_TAMP11:
+	case INT_TAMP12:
+	case INT_TAMP13:
+		res = TEE_SUCCESS;
+		break;
+#endif
+#ifdef CFG_STM32MP15
+	case INT_TAMP5:
+	case INT_TAMP8:
+		res = TEE_SUCCESS;
+		break;
+#endif
+
+	default:
+		break;
+	}
+
+	return res;
+};
+
+bool stm32mp_allow_probe_shared_device(const void *fdt, int node)
+{
+	static int uart_console_node = -1;
+	const char *compat = NULL;
+	static bool once;
+
+	if (!once) {
+		get_console_node_from_dt((void *)fdt, &uart_console_node,
+					 NULL, NULL);
+		once = true;
+	}
+
+	compat = fdt_stringlist_get(fdt, node, "compatible", 0, NULL);
+
+	/*
+	 * Allow OP-TEE console and MP15 I2C to be shared
+	 * with non-secure world
+	 */
+	if (node == uart_console_node ||
+	    !strcmp(compat, "st,stm32mp15-i2c-non-secure") ||
+	    (IS_ENABLED(CFG_STM32MP15) && !strcmp(compat, "st,stm32-timers")))
+		return true;
+
+	return false;
+}
+
+#if defined(CFG_STM32MP15) && defined(CFG_WITH_PAGER)
+paddr_t stm32mp1_pa_or_sram_alias_pa(paddr_t pa)
+{
+	/*
+	 * OP-TEE uses the alias physical addresses of SRAM1/2/3/4,
+	 * not the standard physical addresses. This choice was initially
+	 * driven by pager that needs physically contiguous memories
+	 * for internal secure memories.
+	 */
+	if (core_is_buffer_inside(pa, 1, SRAM1_ALT_BASE, SRAM1_SIZE))
+		pa += SRAM1_BASE - SRAM1_ALT_BASE;
+	else if (core_is_buffer_inside(pa, 1, SRAM2_ALT_BASE, SRAM2_SIZE))
+		pa += SRAM2_BASE - SRAM2_ALT_BASE;
+	else if (core_is_buffer_inside(pa, 1, SRAM3_ALT_BASE, SRAM3_SIZE))
+		pa += SRAM3_BASE - SRAM3_ALT_BASE;
+	else if (core_is_buffer_inside(pa, 1, SRAM4_ALT_BASE, SRAM4_SIZE))
+		pa += SRAM4_BASE - SRAM4_ALT_BASE;
+
+	return pa;
+}
+
+bool stm32mp1_ram_intersect_pager_ram(paddr_t base, size_t size)
+{
+	base = stm32mp1_pa_or_sram_alias_pa(base);
+
+	return core_is_buffer_intersect(base, size, CFG_TZSRAM_START,
+					CFG_TZSRAM_SIZE);
+}
+#endif

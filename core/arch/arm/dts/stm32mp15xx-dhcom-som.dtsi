@@ -8,6 +8,7 @@
 #include "stm32mp15xxaa-pinctrl.dtsi"
 #include <dt-bindings/gpio/gpio.h>
 #include <dt-bindings/mfd/st,stpmic1.h>
+#include <dt-bindings/soc/stm32mp-provisioning.h>
 
 / {
 	aliases {
@@ -27,33 +28,21 @@
 		#size-cells = <1>;
 		ranges;
 
-		mcuram2: mcuram2@10000000 {
+		mcusram1: mcuram1@10000000 {
 			compatible = "shared-dma-pool";
-			reg = <0x10000000 0x40000>;
+			reg = <0x10000000 0x20000>;
 			no-map;
 		};
 
-		vdev0vring0: vdev0vring0@10040000 {
+		mcusram2: mcuram2@10020000 {
 			compatible = "shared-dma-pool";
-			reg = <0x10040000 0x1000>;
+			reg = <0x10020000 0x20000>;
 			no-map;
 		};
 
-		vdev0vring1: vdev0vring1@10041000 {
+		mcusram3: mcuram3@10040000 {
 			compatible = "shared-dma-pool";
-			reg = <0x10041000 0x1000>;
-			no-map;
-		};
-
-		vdev0buffer: vdev0buffer@10042000 {
-			compatible = "shared-dma-pool";
-			reg = <0x10042000 0x4000>;
-			no-map;
-		};
-
-		mcuram: mcuram@30000000 {
-			compatible = "shared-dma-pool";
-			reg = <0x30000000 0x40000>;
+			reg = <0x10040000 0x10000>;
 			no-map;
 		};
 
@@ -61,6 +50,15 @@
 			compatible = "shared-dma-pool";
 			reg = <0x38000000 0x10000>;
 			no-map;
+		};
+	};
+
+	shadow-prov {
+		compatible = "st,provisioning";
+		hw2_prov {
+			nvmem-cells = <&hw2_otp>;
+			st,shadow-value = <0x000001E0>;
+			st,shadow-lock = <STICKY_LOCK_SR>;
 		};
 	};
 
@@ -72,6 +70,7 @@
 		gpio = <&gpiog 3 GPIO_ACTIVE_LOW>;
 		regulator-always-on;
 		regulator-boot-on;
+		st,regulator-warm-boot-on;
 		vin-supply = <&vdd>;
 	};
 };
@@ -312,9 +311,9 @@
 
 			vdda: ldo1 {
 				regulator-name = "vdda";
-				regulator-always-on;
 				regulator-min-microvolt = <2900000>;
 				regulator-max-microvolt = <2900000>;
+				regulator-always-on;
 				interrupts = <IT_CURLIM_LDO1 0>;
 			};
 
@@ -342,8 +341,9 @@
 				regulator-name = "vdd_sd";
 				regulator-min-microvolt = <2900000>;
 				regulator-max-microvolt = <2900000>;
-				interrupts = <IT_CURLIM_LDO5 0>;
 				regulator-boot-on;
+				st,regulator-warm-boot-on;
+				interrupts = <IT_CURLIM_LDO5 0>;
 			};
 
 			v1v8: ldo6 {
@@ -414,13 +414,27 @@
 };
 
 &m4_rproc {
-	memory-region = <&retram>, <&mcuram>, <&mcuram2>, <&vdev0vring0>,
-			<&vdev0vring1>, <&vdev0buffer>;
+	memory-region = <&retram>, <&mcusram1>, <&mcusram2>, <&mcusram3>;
 	mboxes = <&ipcc 0>, <&ipcc 1>, <&ipcc 2>;
 	mbox-names = "vq0", "vq1", "shutdown";
 	interrupt-parent = <&exti>;
 	interrupts = <68 1>;
 	status = "okay";
+};
+
+&mcusram1 {
+	access-controllers-conf-default = <&etzpc DECPROT(STM32MP1_ETZPC_SRAM1_ID, DECPROT_MCU_ISOLATION, DECPROT_UNLOCK)>;
+	access-controllers-conf-load = <&etzpc DECPROT(STM32MP1_ETZPC_SRAM1_ID, DECPROT_S_RW, DECPROT_UNLOCK)>;
+};
+
+&mcusram2 {
+	access-controllers-conf-default = <&etzpc DECPROT(STM32MP1_ETZPC_SRAM2_ID, DECPROT_MCU_ISOLATION, DECPROT_UNLOCK)>;
+	access-controllers-conf-load = <&etzpc DECPROT(STM32MP1_ETZPC_SRAM2_ID, DECPROT_S_RW, DECPROT_UNLOCK)>;
+};
+
+&mcusram3 {
+	access-controllers-conf-default = <&etzpc DECPROT(STM32MP1_ETZPC_SRAM3_ID, DECPROT_NS_RW, DECPROT_UNLOCK)>;
+	access-controllers-conf-load = <&etzpc DECPROT(STM32MP1_ETZPC_SRAM3_ID, DECPROT_S_RW, DECPROT_UNLOCK)>;
 };
 
 &pwr_regulators {
@@ -464,11 +478,12 @@
 	status = "okay";
 };
 
-&rng1 {
-	status = "okay";
+&retram {
+	access-controllers-conf-default = <&etzpc DECPROT(STM32MP1_ETZPC_RETRAM_ID, DECPROT_MCU_ISOLATION, DECPROT_UNLOCK)>;
+	access-controllers-conf-load = <&etzpc DECPROT(STM32MP1_ETZPC_RETRAM_ID, DECPROT_S_RW, DECPROT_UNLOCK)>;
 };
 
-&rtc {
+&rng1 {
 	status = "okay";
 };
 

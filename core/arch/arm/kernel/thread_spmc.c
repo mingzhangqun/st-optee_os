@@ -988,7 +988,7 @@ static int add_mem_share(struct ffa_mem_transaction_x *mem_trans,
 		return FFA_NO_MEMORY;
 
 	if (flen != blen) {
-		struct mem_frag_state *s = calloc(sizeof(*s), 1);
+		struct mem_frag_state *s = calloc(1, sizeof(*s));
 
 		if (!s) {
 			rc = FFA_NO_MEMORY;
@@ -1570,6 +1570,11 @@ uint32_t thread_rpc_cmd(uint32_t cmd, size_t num_params,
 	return get_rpc_arg_res(arg, num_params, params);
 }
 
+uint32_t thread_rpc_ocall2_cmd(uint32_t param[2] __unused)
+{
+	return 1;
+}
+
 static void thread_rpc_free(unsigned int bt, uint64_t cookie, struct mobj *mobj)
 {
 	struct thread_rpc_arg rpc_arg = { .call = {
@@ -1654,13 +1659,16 @@ struct mobj *thread_rpc_alloc_kernel_payload(size_t size)
 
 void thread_rpc_free_kernel_payload(struct mobj *mobj)
 {
-	thread_rpc_free(OPTEE_RPC_SHM_TYPE_KERNEL, mobj_get_cookie(mobj), mobj);
+	if (mobj)
+		thread_rpc_free(OPTEE_RPC_SHM_TYPE_KERNEL,
+				mobj_get_cookie(mobj), mobj);
 }
 
 void thread_rpc_free_payload(struct mobj *mobj)
 {
-	thread_rpc_free(OPTEE_RPC_SHM_TYPE_APPL, mobj_get_cookie(mobj),
-			mobj);
+	if (mobj)
+		thread_rpc_free(OPTEE_RPC_SHM_TYPE_APPL, mobj_get_cookie(mobj),
+				mobj);
 }
 
 struct mobj *thread_rpc_alloc_global_payload(size_t size)
@@ -1670,8 +1678,9 @@ struct mobj *thread_rpc_alloc_global_payload(size_t size)
 
 void thread_rpc_free_global_payload(struct mobj *mobj)
 {
-	thread_rpc_free(OPTEE_RPC_SHM_TYPE_GLOBAL, mobj_get_cookie(mobj),
-			mobj);
+	if (mobj)
+		thread_rpc_free(OPTEE_RPC_SHM_TYPE_GLOBAL,
+				mobj_get_cookie(mobj), mobj);
 }
 
 void thread_spmc_register_secondary_ep(vaddr_t ep)
