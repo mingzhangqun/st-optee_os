@@ -503,7 +503,8 @@ static TEE_Result scmi_scpfw_cfg_early_init(void)
 	/* There is 1 agent with 1 channel */
 
 	scpfw_cfg.agent_count = 1;
-	scpfw_cfg.agent_config = calloc(1, sizeof(*scpfw_cfg.agent_config));
+	scpfw_cfg.agent_config = calloc(scpfw_cfg.agent_count,
+					sizeof(*scpfw_cfg.agent_config));
 
 	scpfw_cfg.agent_config[0].name = "agent";
 	scpfw_cfg.agent_config[0].agent_id = 1;
@@ -528,7 +529,7 @@ static TEE_Result scmi_scpfw_cfg_init(void)
 
 	for (i = 0; i < ARRAY_SIZE(scmi_channel); i++) {
 		/* Clock and reset are exposed to agent#0/channel#0 */
-		channel_cfg = scpfw_cfg.agent_config[i].channel_config;
+		channel_cfg = scpfw_cfg.agent_config[0].channel_config + i;
 		channel_cfg->name = "channel";
 
 		channel_cfg->clock_count = ARRAY_SIZE(stm32_scmi_clock);
