@@ -171,7 +171,7 @@
 };
 
 &hash1 {
-	status = "disabled";
+	status = "ok";
 };
 
 &i2c1 {
@@ -644,10 +644,12 @@
 
 &rng1 {
 	status = "okay";
+	secure-status = "okay";
 };
 
 &rtc {
 	status = "okay";
+	secure-status = "okay";
 };
 
 &sai2 {
