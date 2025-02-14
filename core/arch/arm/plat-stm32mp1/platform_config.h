@@ -175,6 +175,7 @@
 #define UART7_BASE			0x40018000
 #define UART8_BASE			0x40019000
 #define VREFBUF_BASE			0x50025000
+#define I2C2_BASE			0x40013000
 
 #define ROM_BASE			0
 #define ROM_SIZE			0x20000
