@@ -198,6 +198,7 @@ static void register_periph_iomem(vaddr_t base, enum shres_state state)
 	case UART8_BASE:
 	/* Fall through */
 #endif
+	case I2C2_BASE:
 	case IWDG2_BASE:
 		/* Allow drivers to register some non-secure resources */
 		DMSG("IO for non-secure resource 0x%lx", base);
